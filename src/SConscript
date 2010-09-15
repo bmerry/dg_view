@@ -1,0 +1,49 @@
+#   This file is part of Datagrind, a tool for tracking data accesses.
+#
+#   Copyright (C) 2010 Bruce Merry
+#      bmerry@users.sourceforge.net
+#
+#   This program is free software; you can redistribute it and/or
+#   modify it under the terms of the GNU General Public License as
+#   published by the Free Software Foundation; either version 2 of the
+#   License, or (at your option) any later version.
+#
+#   This program is distributed in the hope that it will be useful, but
+#   WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+#   General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public License
+#   along with this program; if not, write to the Free Software
+#   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA
+#   02111-1307, USA.
+#
+#   The GNU General Public License is contained in the file COPYING.
+
+import os
+
+vars = Variables(None, ARGUMENTS)
+vars.AddVariables(
+    EnumVariable('config', 'Build configuration', 'debug', allowed_values = ('debug', 'release', 'optimized'))
+    )
+
+env = Environment(variables = vars, ENV = os.environ)
+env.Append(**vars.UnknownVariables())
+Help(vars.GenerateHelpText(env))
+if GetOption('help'):
+    Return()
+
+env.Append(LIBS = ['bfd', 'GLEW', 'glut', 'GL'])
+env.ParseFlags('!pkg-config --cflags --libs gtk+-2.0')
+env.Append(CCFLAGS = ['-Wall'])
+if env['config'] == 'debug':
+    env.Append(CCFLAGS = ['-g', '-O0'], LINKFLAGS = ['-g'])
+elif env['config'] == 'release':
+    env.Append(CCFLAGS = ['-O2'], LINKFLAGS = ['-s'], CPPDEFINES = [('NDEBUG', 1)])
+elif env['config'] == 'optimized':
+    env.Append(CCFLAGS = ['-g', '-O2'], LINKFLAGS = ['-g'])
+
+env.Program('dg_view', source = [
+    'dg_view.cpp',
+    'dg_view_debuginfo.cpp',
+    'dg_view_parse.cpp'])
