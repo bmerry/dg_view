@@ -49,4 +49,4 @@ common = env.Object([
     'dg_view_parse.cpp'])
 
 env.Program('dg_view_gl', source = [common, 'dg_view_gl.cpp'])
-env.Program('dg_view_gtk', source = [common, 'dg_view_gui.cpp'])
+env.Program('dg_view_gtk', source = [common, 'dg_view_gtk.cpp'])
