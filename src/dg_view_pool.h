@@ -76,7 +76,7 @@ pool_allocator<T>::~pool_allocator()
     for (i = chunks.begin();
          i != chunks.end();
          ++i)
-        delete i->storage;
+        delete[] i->storage;
 }
 
 template<typename T>

@@ -553,7 +553,7 @@ const page_map &dg_view_page_map()
 
 void dg_view_usage(const char *prog, int code)
 {
-    fprintf(stderr, "Usage: %s [--ranges=r1,r2] [--events=e1,e1] <file>\n", prog);
+    fprintf(stderr, "Usage: %s [-m] [--ranges=r1,...] [--events=e1,...] <file>\n", prog);
     exit(code);
 }
 

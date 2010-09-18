@@ -73,7 +73,7 @@ static void build_main_window(viewer &v)
     g_signal_connect(G_OBJECT(v.window), "destroy",
                      G_CALLBACK(gtk_main_quit), NULL);
 
-    build_region(v.region, 400, 400);
+    build_region(v.region, 800, 800);
     gtk_container_add(GTK_CONTAINER(v.window), v.region.events);
 
     gtk_widget_show_all(v.window);
@@ -107,6 +107,8 @@ static bool range_to_pixels(float lo, float hi,
     pixel_hi = (int) floor((hi - view_min) * scale + 0.5f);
     if (pixel_hi == pixel_lo)
         pixel_hi++;
+    pixel_lo = max(pixel_lo, 0);
+    pixel_hi = min(pixel_hi, pixels);
     return true;
 }
 
@@ -173,6 +175,7 @@ int main(int argc, char **argv)
     g_thread_init(NULL);
     gtk_init(&argc, &argv);
 
+    dg_view_parse_opts(&argc, argv);
     if (argc != 2)
     {
         dg_view_usage(argv[0], 2);
