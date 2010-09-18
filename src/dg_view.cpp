@@ -126,7 +126,7 @@ mem_access dg_view_nearest_access(double addr, double iseq, double ratio)
      * the search.
      */
     vector<bbrun>::const_iterator back, forw, best = bbruns.end();
-    size_t best_i;
+    size_t best_i = 0;
     double best_score = HUGE_VAL;
 
     forw = lower_bound(bbruns.begin(), bbruns.end(), (uint64_t) iseq, compare_bbrun_iseq());
@@ -513,7 +513,7 @@ bool dg_view_load(const char *filename)
         return false;
     }
 
-#if 0
+#if 1
     printf("  %zu bbdefs\n"
            "  %zu bbruns\n"
            "  %zu contexts\n"
