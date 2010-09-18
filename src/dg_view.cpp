@@ -28,8 +28,6 @@
 #include <cmath>
 #include <cassert>
 #include <stdint.h>
-#include <GL/glew.h>
-#include <GL/glut.h>
 #include <getopt.h>
 #include <vector>
 #include <algorithm>
@@ -48,58 +46,6 @@
 
 using namespace std;
 
-/* Memory block allocated with malloc or similar function in the guest */
-struct mem_block
-{
-    HWord addr;
-    HWord size;
-    vector<HWord> stack;
-    string label;
-};
-
-/* Not stored anyway, only used to get information about accesses */
-struct mem_access
-{
-    HWord addr;
-    uint8_t dir;
-    uint8_t size;
-    mem_block *block;
-
-    uint64_t iseq;
-    vector<HWord> stack;
-
-    mem_access() : addr(0), dir(0), size(0), block(NULL), iseq(0), stack() {}
-};
-
-struct context
-{
-    HWord bbdef_index;
-    vector<HWord> stack;
-};
-
-struct bbdef_access
-{
-    uint8_t dir;
-    uint8_t size;
-    uint8_t iseq;
-};
-
-struct bbdef
-{
-    vector<HWord> instr_addrs;
-    vector<bbdef_access> accesses;
-};
-
-struct bbrun
-{
-    uint64_t iseq_start;
-    uint64_t dseq_start;
-    uint32_t context_index;
-    uint32_t n_addrs;
-    HWord *addrs;                 /* Allocated from hword_pool; NULL means discarded */
-    mem_block **blocks;           /* Allocated from mem_block_ptr_pool */
-};
-
 struct compare_bbrun_iseq
 {
     bool operator()(const bbrun &a, const bbrun &b) const
@@ -117,10 +63,6 @@ struct compare_bbrun_iseq
         return iseq < a.iseq_start;
     }
 };
-
-#define DG_VIEW_PAGE_SIZE 4096
-#define DG_VIEW_LINE_SIZE 64
-#define DG_VIEW_SINGLE_DOT 1 /* Set to 1 to show only one dot per multi-byte access */
 
 static pool_allocator<HWord> hword_pool;
 static pool_allocator<mem_block *> mem_block_ptr_pool;
@@ -142,10 +84,8 @@ static set<string> chosen_ranges;
 static vector<bbdef> bbdefs;
 static vector<bbrun> bbruns;
 static vector<context> contexts;
-static map<HWord, size_t> page_map;
+static page_map fwd_page_map;
 static map<size_t, HWord> rev_page_map;
-
-static GLuint num_vertices;
 
 template<typename T> T page_round_down(T x)
 {
@@ -180,7 +120,7 @@ static pair<double, size_t> nearest_access_bbrun(const bbrun &bbr, double addr, 
     return make_pair(best_score, best_i);
 }
 
-static mem_access nearest_access(double addr, double iseq, double ratio)
+mem_access dg_view_nearest_access(double addr, double iseq, double ratio)
 {
     /* Start at the right instruction and search outwards until we can bound
      * the search.
@@ -251,6 +191,19 @@ static mem_access nearest_access(double addr, double iseq, double ratio)
     return ans;
 }
 
+const bbrun_list &dg_view_bbruns()
+{
+    return bbruns;
+}
+
+const bbdef &dg_view_bbrun_get_bbdef(const bbrun &bbr)
+{
+    assert(bbr.context_index < contexts.size());
+    const context &ctx = contexts[bbr.context_index];
+    assert(ctx.bbdef_index < bbdefs.size());
+    return bbdefs[ctx.bbdef_index];
+}
+
 static mem_block *find_block(HWord addr)
 {
     mem_block *block = NULL;
@@ -286,7 +239,7 @@ static bool keep_access(HWord addr, uint8_t size)
     return matched;
 }
 
-static void load(const char *filename)
+bool dg_view_load(const char *filename)
 {
     bool first = true;
     uint64_t iseq = 0;
@@ -297,7 +250,7 @@ static void load(const char *filename)
     if (!f)
     {
         fprintf(stderr, "Could not open `%s'.\n", filename);
-        exit(1);
+        return false;
     }
     while (NULL != (rp_ptr = record_parser::create(f)))
     {
@@ -427,7 +380,7 @@ static void load(const char *filename)
                             if (keep)
                             {
                                 keep_any = true;
-                                page_map[page_round_down(addr)] = 0;
+                                fwd_page_map[page_round_down(addr)] = 0;
                                 bbr.addrs[i] = addr;
                                 bbr.blocks[i] = find_block(addr);
                             }
@@ -514,7 +467,7 @@ static void load(const char *filename)
                     {
                         HWord avma = rp->extract_word();
                         string filename = rp->extract_string();
-                        load_object_file(filename.c_str(), avma);
+                        dg_view_load_object_file(filename.c_str(), avma);
                     }
                     break;
                 default:
@@ -536,7 +489,7 @@ static void load(const char *filename)
         catch (record_parser_error &e)
         {
             fprintf(stderr, "%s\n", e.what());
-            exit(1);
+            return false;
         }
     }
     fclose(f);
@@ -547,14 +500,20 @@ static void load(const char *filename)
     bbruns.swap(tmp);
 
     size_t remapped_base = 0;
-    for (map<HWord, size_t>::iterator i = page_map.begin(); i != page_map.end(); i++)
+    for (map<HWord, size_t>::iterator i = fwd_page_map.begin(); i != fwd_page_map.end(); i++)
     {
         i->second = remapped_base;
         remapped_base += DG_VIEW_PAGE_SIZE;
         rev_page_map[i->second] = i->first;
     }
 
-#if 1
+    if (bbruns.empty())
+    {
+        fprintf(stderr, "No accesses match the criteria.\n");
+        return false;
+    }
+
+#if 0
     printf("  %zu bbdefs\n"
            "  %zu bbruns\n"
            "  %zu contexts\n"
@@ -566,260 +525,36 @@ static void load(const char *filename)
            bbruns.back().iseq_start,
            bbruns.back().dseq_start + bbruns.back().n_addrs);
 #endif
+    return true;
 }
 
-static size_t remap_address(HWord a)
+size_t dg_view_remap_address(HWord a)
 {
     HWord base = page_round_down(a);
-    map<HWord, size_t>::const_iterator it = page_map.find(base);
-    assert(it != page_map.end());
+    map<HWord, size_t>::const_iterator it = fwd_page_map.find(base);
+    assert(it != fwd_page_map.end());
     return (a - base) + it->second;
 }
 
-static void usage(const char *prog, int code)
+HWord dg_view_revmap_addr(size_t addr)
+{
+    HWord remapped_page = page_round_down(addr);
+    if (!rev_page_map.count(addr))
+        return 0;
+    HWord page = rev_page_map[remapped_page];
+    HWord addr2 = (addr - remapped_page) + page;
+    return addr2;
+}
+
+const page_map &dg_view_page_map()
+{
+    return fwd_page_map;
+}
+
+void dg_view_usage(const char *prog, int code)
 {
     fprintf(stderr, "Usage: %s [--ranges=r1,r2] [--events=e1,e1] <file>\n", prog);
     exit(code);
-}
-
-typedef struct
-{
-    GLfloat pos[2];
-    GLubyte color[4];
-} vertex;
-
-static GLfloat min_x, max_x, min_y, max_y;
-static GLfloat window_width, window_height;
-static GLint zoom_x, zoom_y;
-
-static size_t count_access_bytes(void)
-{
-    size_t total = 0;
-    for (size_t i = 0; i < bbruns.size(); i++)
-    {
-        bbrun &bbr = bbruns[i];
-        for (size_t j = 0; j < bbr.n_addrs; j++)
-            if (bbr.addrs[j])
-            {
-                const context &ctx = contexts[bbr.context_index];
-                const bbdef &bbd = bbdefs[ctx.bbdef_index];
-                assert(j < bbd.accesses.size());
-                const bbdef_access &bbda = bbd.accesses[j];
-#if DG_VIEW_SINGLE_DOT
-                total++;
-#else
-                total += bbda.size;
-#endif
-            }
-    }
-    return total;
-}
-
-static void init_gl(void)
-{
-    GLuint vbo;
-    GLubyte color_read[4] = {0, 255, 0, 255};
-    GLubyte color_write[4] = {0, 0, 255, 255};
-    GLubyte color_instr[4] = {255, 0, 0, 255};
-    vertex *start = NULL;
-    num_vertices = count_access_bytes();
-
-    vector<vertex> vertices(num_vertices);
-    min_x = HUGE_VALF;
-    max_x = -HUGE_VALF;
-
-    size_t v = 0;
-    for (size_t i = 0; i < bbruns.size(); i++)
-    {
-        bbrun &bbr = bbruns[i];
-        for (size_t j = 0; j < bbr.n_addrs; j++)
-            if (bbr.addrs[j])
-            {
-                const context &ctx = contexts[bbr.context_index];
-                const bbdef &bbd = bbdefs[ctx.bbdef_index];
-                assert(j < bbd.accesses.size());
-                const bbdef_access &bbda = bbd.accesses[j];
-#if DG_VIEW_SINGLE_DOT
-                int dots = 1;
-#else
-                int dots = bbda.size;
-#endif
-                for (int k = 0; k < dots; k++)
-                {
-                    vertices[v].pos[0] = remap_address(bbr.addrs[j]) + k;
-                    vertices[v].pos[1] = bbr.iseq_start + bbda.iseq;
-                    min_x = min(min_x, vertices[v].pos[0]);
-                    max_x = max(max_x, vertices[v].pos[0]);
-                    switch (bbda.dir)
-                    {
-                    case DG_ACC_READ:
-                        memcpy(vertices[v].color, color_read, sizeof(color_read));
-                        break;
-                    case DG_ACC_WRITE:
-                        memcpy(vertices[v].color, color_write, sizeof(color_write));
-                        break;
-                    case DG_ACC_EXEC:
-                        memcpy(vertices[v].color, color_instr, sizeof(color_instr));
-                        break;
-                    }
-                    v++;
-                }
-            }
-    }
-    assert(v == num_vertices);
-
-    glGenBuffers(1, &vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-
-    if (glGetError() != GL_NO_ERROR)
-    {
-        fprintf(stderr, "Error initialising GL state\n");
-        exit(1);
-    }
-    glBufferData(GL_ARRAY_BUFFER, num_vertices * sizeof(vertex), &vertices[0], GL_STATIC_DRAW);
-    if (glGetError() != GL_NO_ERROR)
-    {
-        fprintf(stderr,
-                "Error loading buffer data. It may be more than your GL implementation can handle.\n"
-                "Try using the --events and --ranges options.\n");
-        exit(1);
-    }
-
-    glVertexPointer(2, GL_FLOAT, sizeof(vertex), &start->pos);
-    glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(vertex), &start->color);
-    glEnableClientState(GL_VERTEX_ARRAY);
-    glEnableClientState(GL_COLOR_ARRAY);
-    glBlendFuncSeparate(GL_ONE, GL_DST_ALPHA, GL_ONE, GL_ZERO);
-    glEnable(GL_BLEND);
-
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-
-    min_y = vertices[0].pos[1] - 1.0f;
-    max_y = vertices.back().pos[1] + 1.0f;
-    min_x -= 0.5f;
-    max_x += 0.5f;
-
-    if (glGetError() != GL_NO_ERROR)
-    {
-        fprintf(stderr, "Error initialising GL state\n");
-        exit(1);
-    }
-}
-
-static void display(void)
-{
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-
-    glLoadIdentity();
-    glOrtho(min_x, max_x, max_y, min_y, -1.0, 1.0);
-
-    HWord last = 0;
-    GLfloat xrate = (max_x - min_x) / window_width;
-    glBegin(GL_LINES);
-    for (map<HWord, size_t>::const_iterator i = page_map.begin(); i != page_map.end(); ++i)
-    {
-        if (i->first != last + DG_VIEW_PAGE_SIZE)
-        {
-            glColor4ub(192, 192, 192, 0);
-            glVertex2f(i->second, min_y);
-            glVertex2f(i->second, max_y);
-        }
-        else if (xrate < DG_VIEW_PAGE_SIZE / 8)
-        {
-            glColor4ub(64, 64, 64, 0);
-            glVertex2f(i->second, min_y);
-            glVertex2f(i->second, max_y);
-        }
-        if (xrate < DG_VIEW_LINE_SIZE / 8)
-        {
-            glColor4ub(96, 32, 32, 0);
-            for (int j = DG_VIEW_LINE_SIZE; j < DG_VIEW_PAGE_SIZE; j += DG_VIEW_LINE_SIZE)
-            {
-                glVertex2f(i->second + j, min_y);
-                glVertex2f(i->second + j, max_y);
-            }
-        }
-        last = i->first;
-    }
-    glEnd();
-
-    glDrawArrays(GL_POINTS, 0, num_vertices);
-
-    glutSwapBuffers();
-}
-
-static void mouse(int button, int state, int x, int y)
-{
-    if (button == GLUT_LEFT_BUTTON)
-    {
-        if (state == GLUT_DOWN)
-        {
-            zoom_x = x;
-            zoom_y = y;
-        }
-        else if (abs(zoom_x - x) > 2 && abs(zoom_y - y) > 2)
-        {
-            GLfloat x1 = min_x + (zoom_x + 0.5) * (max_x - min_x) / window_width;
-            GLfloat y1 = min_y + (zoom_y + 0.5) * (max_y - min_y) / window_height;
-            GLfloat x2 = min_x + (x + 0.5) * (max_x - min_x) / window_width;
-            GLfloat y2 = min_y + (y + 0.5) * (max_y - min_y) / window_height;
-
-            min_x = min(x1, x2) - 0.5f;
-            max_x = max(x1, x2) + 0.5f;
-            min_y = min(y1, y2) - 0.5f;
-            max_y = max(y1, y2) + 0.5f;
-            glutPostRedisplay();
-        }
-        else
-        {
-            HWord remapped = (HWord) (0.5 + (GLdouble) (x + 0.5f) / window_width * (max_x - min_x) + min_x);
-            HWord remapped_page = page_round_down(remapped);
-            HWord page = rev_page_map[remapped_page];
-
-            HWord addr = (remapped - remapped_page) + page;
-            double seq = (GLdouble) (y + 0.5f) / window_height * (max_y - min_y) + min_y;
-
-            double addr_scale = window_width / (max_x - min_x);
-            double seq_scale = window_height / (max_y - min_y);
-            double ratio = addr_scale / seq_scale;
-
-            mem_access access = nearest_access(addr, seq, ratio);
-            if (access.size != 0)
-            {
-                printf("Nearest access: %#zx", access.addr);
-                mem_block *block = access.block;
-                if (block != NULL)
-                {
-                    printf(": %zu bytes inside a block of size %zu, allocated at\n",
-                           addr - block->addr, block->size);
-                    for (size_t i = 0; i < block->stack.size(); i++)
-                    {
-                        string loc = addr2line(block->stack[i]);
-                        printf("  %s\n", loc.c_str());
-                    }
-                }
-                else
-                    printf("\n");
-
-                if (!access.stack.empty())
-                {
-                    printf("At\n");
-                    for (size_t i = 0; i < access.stack.size();i++)
-                    {
-                        string loc = addr2line(access.stack[i]);
-                        printf("  %s\n", loc.c_str());
-                    }
-                }
-            }
-        }
-    }
-}
-
-static void reshape(int width, int height)
-{
-    window_width = width;
-    window_height = height;
-    glViewport(0, 0, width, height);
 }
 
 /* Splits a string to pieces on commas. Empty parts are preserved, but if
@@ -845,7 +580,7 @@ static vector<string> split_comma(const string &s)
     }
 }
 
-static void parse_opts(int *argc, char **argv)
+void dg_view_parse_opts(int *argc, char **argv)
 {
     static const struct option longopts[] =
     {
@@ -887,39 +622,4 @@ static void parse_opts(int *argc, char **argv)
     for (int i = optind; i < *argc; i++)
         argv[i - optind + 1] = argv[i];
     *argc -= optind - 1;
-}
-
-int main(int argc, char **argv)
-{
-    glutInit(&argc, argv);
-    parse_opts(&argc, argv);
-
-    if (argc != 2)
-    {
-        usage(argv[0], 2);
-    }
-    load(argv[1]);
-    if (bbruns.empty())
-    {
-        fprintf(stderr, "No accesses match the criteria.\n");
-        return 0;
-    }
-
-    glutInitWindowSize(800, 800);
-    glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE);
-    glutCreateWindow("dg_view");
-    glutDisplayFunc(display);
-    glutMouseFunc(mouse);
-    glutReshapeFunc(reshape);
-    glewInit();
-    if (!GLEW_VERSION_1_5)
-    {
-        fprintf(stderr, "OpenGL 1.5 or later is required.\n");
-        return 1;
-    }
-    init_gl();
-
-    glutMainLoop();
-
-    return 0;
 }

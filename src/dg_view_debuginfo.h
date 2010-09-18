@@ -29,9 +29,9 @@
 #include <string>
 
 /* Load symbols from an object file, overriding the actual VMA of .text. */
-void load_object_file(const char *filename, HWord text_avma);
+void dg_view_load_object_file(const char *filename, HWord text_avma);
 
 /* Turn a code address into a human-friendly form */
-std::string addr2line(HWord addr);
+std::string dg_view_addr2line(HWord addr);
 
 #endif /* __DG_VIEW_DEBUGINFO_H */

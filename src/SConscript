@@ -34,7 +34,7 @@ if GetOption('help'):
     Return()
 
 env.Append(LIBS = ['bfd', 'GLEW', 'glut', 'GL'])
-env.ParseFlags('!pkg-config --cflags --libs gtk+-2.0')
+env.MergeFlags('!pkg-config --cflags --libs gtk+-2.0 gdk-pixbuf-2.0')
 env.Append(CCFLAGS = ['-Wall'])
 if env['config'] == 'debug':
     env.Append(CCFLAGS = ['-g', '-O0'], LINKFLAGS = ['-g'])
@@ -44,6 +44,7 @@ elif env['config'] == 'optimized':
     env.Append(CCFLAGS = ['-g', '-O2'], LINKFLAGS = ['-g'])
 
 env.Program('dg_view', source = [
+    'dg_view_gl.cpp',
     'dg_view.cpp',
     'dg_view_debuginfo.cpp',
     'dg_view_parse.cpp'])

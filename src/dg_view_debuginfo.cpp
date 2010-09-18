@@ -136,7 +136,7 @@ bool object_subfile::load(const char *filename)
 
 } /* namespace */
 
-void load_object_file(const char *filename, HWord text_avma)
+void dg_view_load_object_file(const char *filename, HWord text_avma)
 {
     auto_ptr<object_subfile> primary(new object_subfile);
     if (!primary->load(filename))
@@ -198,7 +198,7 @@ static void addr2line_section(bfd *abfd, asection *sect, void *arg)
     info->found = true;
 }
 
-string addr2line(HWord addr)
+string dg_view_addr2line(HWord addr)
 {
     ostringstream label;
     label << hex << showbase << addr << dec << noshowbase;
