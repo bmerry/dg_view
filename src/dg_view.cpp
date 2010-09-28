@@ -539,7 +539,7 @@ size_t dg_view_remap_address(HWord a)
 HWord dg_view_revmap_addr(size_t addr)
 {
     HWord remapped_page = page_round_down(addr);
-    if (!rev_page_map.count(addr))
+    if (!rev_page_map.count(remapped_page))
         return 0;
     HWord page = rev_page_map[remapped_page];
     HWord addr2 = (addr - remapped_page) + page;
