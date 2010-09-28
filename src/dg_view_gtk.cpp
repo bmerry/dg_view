@@ -42,8 +42,8 @@ struct viewer_region
     GtkWidget *events;  /* GtkEventBox */
     GdkPixbuf *pixbuf;
 
-    float addr_min, addr_max;
-    float iseq_min, iseq_max;
+    double addr_min, addr_max;
+    double iseq_min, iseq_max;
 
     int click_x;
     int click_y;
@@ -123,15 +123,15 @@ static void prepare_min_max(viewer_region &vr)
  * The return values are a [first, last) range. Returns false if there is
  * no intersection with the viewport.
  */
-static bool range_to_pixels(float lo, float hi,
-                            float view_min, float view_max, int pixels,
+static bool range_to_pixels(double lo, double hi,
+                            double view_min, double view_max, int pixels,
                             int &pixel_lo, int &pixel_hi)
 {
     if (hi <= view_min || lo >= view_max)
         return false;
-    float scale = pixels / (view_max - view_min);
-    pixel_lo = (int) floor((lo - view_min) * scale + 0.5f);
-    pixel_hi = (int) floor((hi - view_min) * scale + 0.5f);
+    double scale = pixels / (view_max - view_min);
+    pixel_lo = (int) floor((lo - view_min) * scale + 0.5);
+    pixel_hi = (int) floor((hi - view_min) * scale + 0.f);
     if (pixel_hi == pixel_lo)
         pixel_hi++;
     pixel_lo = max(pixel_lo, 0);
@@ -210,28 +210,28 @@ static gboolean on_press(GtkWidget *widget, GdkEventButton *event, gpointer user
 /* Computes new values for amin and amax (which are in an abstract space,
  * based on two coordinates of a zoom box in a window space [0, size).
  */
-static void update_zoom(float *amin, float *amax, int w1, int w2, int size)
+static void update_zoom(double *amin, double *amax, int w1, int w2, int size)
 {
     /* Convert to pixel centers */
-    float l = min(w1, w2) + 0.5f;
-    float h = max(w1, w2) + 0.5f;
+    double l = min(w1, w2) + 0.5;
+    double h = max(w1, w2) + 0.5;
 
     /* Convert to parametric coordinates in [0, 1] */
     l /= size;
     h /= size;
 
-    float scale = h - l;
+    double scale = h - l;
     /* Expand slightly so that some context is visible */
-    float expand = 0.1f * scale;
+    double expand = 0.1f * scale;
     l -= expand;
     h += expand;
 
     /* Clamp to the window */
-    l = max(l, 0.0f);
-    h = min(h, 1.0f);
+    l = max(l, 0.0);
+    h = min(h, 1.0);
 
     /* Interpolate to get new coordinates */
-    float old_size = *amax - *amin;
+    double old_size = *amax - *amin;
     *amax = *amin + h * old_size;
     *amin = *amin + l * old_size;
 }
@@ -244,14 +244,59 @@ static gboolean on_release(GtkWidget *widget, GdkEventButton *event, gpointer us
     if (vr->in_click)
     {
         vr->in_click = false;
+        int width = gdk_pixbuf_get_width(vr->pixbuf);
+        int height = gdk_pixbuf_get_height(vr->pixbuf);
         if (abs(event->x - vr->click_x) > 2 && abs(event->y - vr->click_y) > 2)
         {
             /* Assume it was a drag to zoom */
             update_zoom(&vr->addr_min, &vr->addr_max,
-                        vr->click_x, event->x, gdk_pixbuf_get_width(vr->pixbuf));
+                        vr->click_x, event->x, width);
             update_zoom(&vr->iseq_min, &vr->iseq_max,
-                        vr->click_y, event->y, gdk_pixbuf_get_height(vr->pixbuf));
+                        vr->click_y, event->y, height);
             update_region(*vr);
+        }
+        else
+        {
+            /* A click to get information */
+            double addr_size = vr->addr_max - vr->addr_min;
+            double iseq_size = vr->iseq_max - vr->iseq_min;
+
+            double addr_scale = addr_size / width;
+            double iseq_scale = iseq_size / height;
+            double ratio = iseq_scale / addr_scale;
+
+            HWord remapped = (HWord) (0.5 + (event->x + 0.5) * addr_scale + vr->addr_min);
+            HWord addr = dg_view_revmap_addr(remapped);
+            double iseq = (event->y + 0.5) * iseq_scale + vr->iseq_min;
+
+            mem_access access = dg_view_nearest_access(addr, iseq, ratio);
+            if (access.size != 0)
+            {
+                printf("Nearest access: %#zx", access.addr);
+                mem_block *block = access.block;
+                if (block != NULL)
+                {
+                    printf(": %zu bytes inside a block of size %zu, allocated at\n",
+                           access.addr - block->addr, block->size);
+                    for (size_t i = 0; i < block->stack.size(); i++)
+                    {
+                        string loc = dg_view_addr2line(block->stack[i]);
+                        printf("  %s\n", loc.c_str());
+                    }
+                }
+                else
+                    printf("\n");
+
+                if (!access.stack.empty())
+                {
+                    printf("At\n");
+                    for (size_t i = 0; i < access.stack.size();i++)
+                    {
+                        string loc = dg_view_addr2line(access.stack[i]);
+                        printf("  %s\n", loc.c_str());
+                    }
+                }
+            }
         }
     }
     return FALSE;
