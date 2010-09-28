@@ -1,9 +1,34 @@
+/*
+   This file is part of Datagrind, a tool for tracking data accesses.
+
+   Copyright (C) 2010 Bruce Merry
+      bmerry@users.sourceforge.net
+
+   This program is free software; you can redistribute it and/or
+   modify it under the terms of the GNU General Public License as
+   published by the Free Software Foundation; either version 2 of the
+   License, or (at your option) any later version.
+
+   This program is distributed in the hope that it will be useful, but
+   WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   General Public License for more details.
+
+   You should have received a copy of the GNU General Public License
+   along with this program; if not, write to the Free Software
+   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA
+   02111-1307, USA.
+
+   The GNU General Public License is contained in the file COPYING.
+*/
+
 #include <gtk/gtk.h>
 #include <glib.h>
 #include <gdk/gdk.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <cstdlib>
 #include <cmath>
+#include <algorithm>
 
 #include "dg_view.h"
 #include "dg_view_debuginfo.h"
@@ -19,6 +44,10 @@ struct viewer_region
 
     float addr_min, addr_max;
     float iseq_min, iseq_max;
+
+    int click_x;
+    int click_y;
+    bool in_click;
 };
 
 struct viewer
@@ -27,12 +56,8 @@ struct viewer
     viewer_region region;
 };
 
-static gboolean on_click(GtkWidget *widget, GdkEventButton *event, gpointer user_data)
-{
-    /* TODO */
-    viewer_region *vr = (viewer_region *) user_data;
-    return FALSE;
-}
+static gboolean on_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data);
+static gboolean on_release(GtkWidget *widget, GdkEventButton *event, gpointer user_data);
 
 static void build_region(viewer_region &vr, int width, int height)
 {
@@ -56,9 +81,11 @@ static void build_region(viewer_region &vr, int width, int height)
         fprintf(stderr, "Could not allocate an event box\n");
         exit(1);
     }
-    gtk_widget_add_events(vr.events, GDK_BUTTON_PRESS_MASK);
+    gtk_widget_add_events(vr.events, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK);
     g_signal_connect(G_OBJECT(vr.events), "button-press-event",
-                     G_CALLBACK(on_click), &vr);
+                     G_CALLBACK(on_press), &vr);
+    g_signal_connect(G_OBJECT(vr.events), "button-release-event",
+                     G_CALLBACK(on_release), &vr);
     gtk_container_add(GTK_CONTAINER(vr.events), vr.image);
 
     gtk_widget_set_size_request(vr.image, width, height);
@@ -167,6 +194,67 @@ static void update_region(viewer_region &vr)
     }
 
     gtk_widget_queue_draw(vr.image);
+}
+
+static gboolean on_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data)
+{
+    viewer_region *vr = (viewer_region *) user_data;
+
+    vr->in_click = true;
+    vr->click_x = event->x;
+    vr->click_y = event->y;
+    gtk_grab_add(widget);
+    return FALSE;
+}
+
+/* Computes new values for amin and amax (which are in an abstract space,
+ * based on two coordinates of a zoom box in a window space [0, size).
+ */
+static void update_zoom(float *amin, float *amax, int w1, int w2, int size)
+{
+    /* Convert to pixel centers */
+    float l = min(w1, w2) + 0.5f;
+    float h = max(w1, w2) + 0.5f;
+
+    /* Convert to parametric coordinates in [0, 1] */
+    l /= size;
+    h /= size;
+
+    float scale = h - l;
+    /* Expand slightly so that some context is visible */
+    float expand = 0.1f * scale;
+    l -= expand;
+    h += expand;
+
+    /* Clamp to the window */
+    l = max(l, 0.0f);
+    h = min(h, 1.0f);
+
+    /* Interpolate to get new coordinates */
+    float old_size = *amax - *amin;
+    *amax = *amin + h * old_size;
+    *amin = *amin + l * old_size;
+}
+
+static gboolean on_release(GtkWidget *widget, GdkEventButton *event, gpointer user_data)
+{
+    gtk_grab_remove(widget);
+
+    viewer_region *vr = (viewer_region *) user_data;
+    if (vr->in_click)
+    {
+        vr->in_click = false;
+        if (abs(event->x - vr->click_x) > 2 && abs(event->y - vr->click_y) > 2)
+        {
+            /* Assume it was a drag to zoom */
+            update_zoom(&vr->addr_min, &vr->addr_max,
+                        vr->click_x, event->x, gdk_pixbuf_get_width(vr->pixbuf));
+            update_zoom(&vr->iseq_min, &vr->iseq_max,
+                        vr->click_y, event->y, gdk_pixbuf_get_height(vr->pixbuf));
+            update_region(*vr);
+        }
+    }
+    return FALSE;
 }
 
 int main(int argc, char **argv)
