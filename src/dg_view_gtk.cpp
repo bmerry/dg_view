@@ -58,6 +58,7 @@ struct viewer
 
 static gboolean on_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data);
 static gboolean on_release(GtkWidget *widget, GdkEventButton *event, gpointer user_data);
+static gboolean on_resize(GtkWidget *widget, GtkAllocation *event, gpointer user_data);
 
 static void build_region(viewer_region &vr, int width, int height)
 {
@@ -74,6 +75,7 @@ static void build_region(viewer_region &vr, int width, int height)
         fprintf(stderr, "Could not allocate an image for the pixbuf\n");
         exit(1);
     }
+    g_object_unref(vr.pixbuf); /* vr.image will hold a ref for us */
 
     vr.events = gtk_event_box_new();
     if (vr.events == NULL)
@@ -81,11 +83,13 @@ static void build_region(viewer_region &vr, int width, int height)
         fprintf(stderr, "Could not allocate an event box\n");
         exit(1);
     }
-    gtk_widget_add_events(vr.events, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK);
+    gtk_widget_add_events(vr.events, GDK_BUTTON_PRESS_MASK);
     g_signal_connect(G_OBJECT(vr.events), "button-press-event",
                      G_CALLBACK(on_press), &vr);
     g_signal_connect(G_OBJECT(vr.events), "button-release-event",
                      G_CALLBACK(on_release), &vr);
+    g_signal_connect(G_OBJECT(vr.events), "size-allocate",
+                     G_CALLBACK(on_resize), &vr);
     gtk_container_add(GTK_CONTAINER(vr.events), vr.image);
 
     gtk_widget_set_size_request(vr.image, width, height);
@@ -95,13 +99,18 @@ static void build_region(viewer_region &vr, int width, int height)
 
 static void build_main_window(viewer &v)
 {
+    GtkWidget *table;
+
     v.window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(v.window), "dg_view");
     g_signal_connect(G_OBJECT(v.window), "destroy",
                      G_CALLBACK(gtk_main_quit), NULL);
 
-    build_region(v.region, 800, 800);
-    gtk_container_add(GTK_CONTAINER(v.window), v.region.events);
+    build_region(v.region, 600, 600);
+
+    table = gtk_table_new(1, 1, FALSE);
+    gtk_table_attach_defaults(GTK_TABLE(table), v.region.events, 0, 1, 0, 1);
+    gtk_container_add(GTK_CONTAINER(v.window), table);
 
     gtk_widget_show_all(v.window);
 }
@@ -298,6 +307,24 @@ static gboolean on_release(GtkWidget *widget, GdkEventButton *event, gpointer us
                 }
             }
         }
+    }
+    return FALSE;
+}
+
+static gboolean on_resize(GtkWidget *widget, GtkAllocation *event, gpointer user_data)
+{
+    viewer_region *vr = (viewer_region *) user_data;
+
+    if (event->width != gdk_pixbuf_get_width(vr->pixbuf)
+        || event->height != gdk_pixbuf_get_height(vr->pixbuf))
+    {
+        GdkPixbuf *new_pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8,
+                                               event->width, event->height);
+        g_return_val_if_fail(new_pixbuf != NULL, FALSE);
+        gtk_image_set_from_pixbuf(GTK_IMAGE(vr->image), new_pixbuf);
+        vr->pixbuf = new_pixbuf;
+        g_object_unref(new_pixbuf); /* The GtkImage holds a ref for us */
+        update_region(*vr);
     }
     return FALSE;
 }
