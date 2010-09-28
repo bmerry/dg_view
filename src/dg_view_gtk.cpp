@@ -29,6 +29,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <algorithm>
+#include <sstream>
 
 #include "dg_view.h"
 #include "dg_view_debuginfo.h"
@@ -36,8 +37,12 @@
 
 using namespace std;
 
+struct viewer;
+
 struct viewer_region
 {
+    viewer *owner;
+
     GtkWidget *image;   /* GtkImage */
     GtkWidget *events;  /* GtkEventBox */
     GdkPixbuf *pixbuf;
@@ -54,78 +59,94 @@ struct viewer
 {
     GtkWidget *window; /* GtkWindow */
     viewer_region region;
+
+    GtkWidget *addr_entry; /* GtkEntry - displays access address */
 };
 
 static gboolean on_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data);
 static gboolean on_release(GtkWidget *widget, GdkEventButton *event, gpointer user_data);
 static gboolean on_resize(GtkWidget *widget, GtkAllocation *event, gpointer user_data);
 
-static void build_region(viewer_region &vr, int width, int height)
+static void build_region(viewer *v, viewer_region *vr, int width, int height)
 {
-    vr.pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, width, height);
-    if (vr.pixbuf == NULL)
+    vr->owner = v;
+    vr->pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, width, height);
+    if (vr->pixbuf == NULL)
     {
         fprintf(stderr, "Could not allocate a %d x %d pixbuf\n", width, height);
         exit(1);
     }
 
-    vr.image = gtk_image_new_from_pixbuf(vr.pixbuf);
-    if (vr.image == NULL)
+    vr->image = gtk_image_new_from_pixbuf(vr->pixbuf);
+    if (vr->image == NULL)
     {
         fprintf(stderr, "Could not allocate an image for the pixbuf\n");
         exit(1);
     }
-    g_object_unref(vr.pixbuf); /* vr.image will hold a ref for us */
+    g_object_unref(vr->pixbuf); /* vr->image will hold a ref for us */
 
-    vr.events = gtk_event_box_new();
-    if (vr.events == NULL)
+    vr->events = gtk_event_box_new();
+    if (vr->events == NULL)
     {
         fprintf(stderr, "Could not allocate an event box\n");
         exit(1);
     }
-    gtk_widget_add_events(vr.events, GDK_BUTTON_PRESS_MASK);
-    g_signal_connect(G_OBJECT(vr.events), "button-press-event",
-                     G_CALLBACK(on_press), &vr);
-    g_signal_connect(G_OBJECT(vr.events), "button-release-event",
-                     G_CALLBACK(on_release), &vr);
-    g_signal_connect(G_OBJECT(vr.events), "size-allocate",
-                     G_CALLBACK(on_resize), &vr);
-    gtk_container_add(GTK_CONTAINER(vr.events), vr.image);
+    gtk_widget_add_events(vr->events, GDK_BUTTON_PRESS_MASK);
+    g_signal_connect(G_OBJECT(vr->events), "button-press-event",
+                     G_CALLBACK(on_press), vr);
+    g_signal_connect(G_OBJECT(vr->events), "button-release-event",
+                     G_CALLBACK(on_release), vr);
+    g_signal_connect(G_OBJECT(vr->events), "size-allocate",
+                     G_CALLBACK(on_resize), vr);
+    gtk_container_add(GTK_CONTAINER(vr->events), vr->image);
 
-    gtk_widget_set_size_request(vr.image, width, height);
+    gtk_widget_set_size_request(vr->image, width, height);
 
-    gdk_pixbuf_fill(vr.pixbuf, 0x00000000);
+    gdk_pixbuf_fill(vr->pixbuf, 0x00000000);
 }
 
-static void build_main_window(viewer &v)
+static void build_main_window(viewer *v)
 {
     GtkWidget *table;
+    GtkWidget *top_box;
+    GtkWidget *info_box;
 
-    v.window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title(GTK_WINDOW(v.window), "dg_view");
-    g_signal_connect(G_OBJECT(v.window), "destroy",
+    v->window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_window_set_title(GTK_WINDOW(v->window), "dg_view");
+    g_signal_connect(G_OBJECT(v->window), "destroy",
                      G_CALLBACK(gtk_main_quit), NULL);
 
-    build_region(v.region, 600, 600);
+    build_region(v, &v->region, 600, 600);
+
+    v->addr_entry = gtk_entry_new();
+    gtk_entry_set_editable(GTK_ENTRY(v->addr_entry), FALSE);
+    gtk_entry_set_width_chars(GTK_ENTRY(v->addr_entry), 19);
 
     table = gtk_table_new(1, 1, FALSE);
-    gtk_table_attach_defaults(GTK_TABLE(table), v.region.events, 0, 1, 0, 1);
-    gtk_container_add(GTK_CONTAINER(v.window), table);
+    gtk_table_attach_defaults(GTK_TABLE(table), v->region.events, 0, 1, 0, 1);
 
-    gtk_widget_show_all(v.window);
+    info_box = gtk_vbox_new(FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(info_box), v->addr_entry, FALSE, FALSE, 0);
+
+    top_box = gtk_hbox_new(FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(top_box), table, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(top_box), info_box, FALSE, FALSE, 0);
+
+    gtk_container_add(GTK_CONTAINER(v->window), top_box);
+    gtk_widget_show_all(v->window);
 }
 
-static void prepare_min_max(viewer_region &vr)
+static void prepare_min_max(viewer_region *vr)
 {
     const bbrun_list &bbruns = dg_view_bbruns();
     const page_map &pages = dg_view_page_map();
-    vr.addr_min = pages.begin()->second;
-    vr.addr_max = (--pages.end())->second + DG_VIEW_PAGE_SIZE;
-    vr.iseq_min = 0;
+    vr->addr_min = pages.begin()->second;
+    vr->addr_max = (--pages.end())->second + DG_VIEW_PAGE_SIZE;
+    vr->iseq_min = 0;
 
     bbrun_list::const_iterator last_bbrun = --bbruns.end();
     const bbdef &last_bbdef = dg_view_bbrun_get_bbdef(*last_bbrun);
-    vr.iseq_max = last_bbrun->iseq_start + last_bbdef.accesses.back().iseq + 1;
+    vr->iseq_max = last_bbrun->iseq_start + last_bbdef.accesses.back().iseq + 1;
 }
 
 /* Takes a range in a semantic space and gives first and last pixels covered.
@@ -148,18 +169,18 @@ static bool range_to_pixels(double lo, double hi,
     return true;
 }
 
-static void update_region(viewer_region &vr)
+static void update_region(viewer_region *vr)
 {
-    int rowstride = gdk_pixbuf_get_rowstride(vr.pixbuf);
-    guchar *pixels = gdk_pixbuf_get_pixels(vr.pixbuf);
-    int width = gdk_pixbuf_get_width(vr.pixbuf);
-    int height = gdk_pixbuf_get_height(vr.pixbuf);
-    int n_channels = gdk_pixbuf_get_n_channels(vr.pixbuf);
+    int rowstride = gdk_pixbuf_get_rowstride(vr->pixbuf);
+    guchar *pixels = gdk_pixbuf_get_pixels(vr->pixbuf);
+    int width = gdk_pixbuf_get_width(vr->pixbuf);
+    int height = gdk_pixbuf_get_height(vr->pixbuf);
+    int n_channels = gdk_pixbuf_get_n_channels(vr->pixbuf);
 
     g_return_if_fail(n_channels == 3);
-    g_return_if_fail(gdk_pixbuf_get_colorspace(vr.pixbuf) == GDK_COLORSPACE_RGB);
-    g_return_if_fail(gdk_pixbuf_get_bits_per_sample(vr.pixbuf) == 8);
-    gdk_pixbuf_fill(vr.pixbuf, 0);
+    g_return_if_fail(gdk_pixbuf_get_colorspace(vr->pixbuf) == GDK_COLORSPACE_RGB);
+    g_return_if_fail(gdk_pixbuf_get_bits_per_sample(vr->pixbuf) == 8);
+    gdk_pixbuf_fill(vr->pixbuf, 0);
 
     const bbrun_list &bbruns = dg_view_bbruns();
     for (bbrun_list::const_iterator bbr = bbruns.begin(); bbr != bbruns.end(); ++bbr)
@@ -176,10 +197,10 @@ static void update_region(viewer_region &vr)
                 int x1, x2, y1, y2;
 
                 if (range_to_pixels(addr, addr + bbda.size,
-                                    vr.addr_min, vr.addr_max, width,
+                                    vr->addr_min, vr->addr_max, width,
                                     x1, x2) &&
                     range_to_pixels(iseq, iseq + 1,
-                                    vr.iseq_min, vr.iseq_max, height,
+                                    vr->iseq_min, vr->iseq_max, height,
                                     y1, y2))
                 {
                     for (int y = y1; y < y2; y++)
@@ -202,7 +223,7 @@ static void update_region(viewer_region &vr)
             }
     }
 
-    gtk_widget_queue_draw(vr.image);
+    gtk_widget_queue_draw(vr->image);
 }
 
 static gboolean on_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data)
@@ -262,7 +283,7 @@ static gboolean on_release(GtkWidget *widget, GdkEventButton *event, gpointer us
                         vr->click_x, event->x, width);
             update_zoom(&vr->iseq_min, &vr->iseq_max,
                         vr->click_y, event->y, height);
-            update_region(*vr);
+            update_region(vr);
         }
         else
         {
@@ -281,7 +302,11 @@ static gboolean on_release(GtkWidget *widget, GdkEventButton *event, gpointer us
             mem_access access = dg_view_nearest_access(addr, iseq, ratio);
             if (access.size != 0)
             {
+                ostringstream addr_str;
+                addr_str << showbase << hex << access.addr;
+                gtk_entry_set_text(GTK_ENTRY(vr->owner->addr_entry), addr_str.str().c_str());
                 printf("Nearest access: %#zx", access.addr);
+
                 mem_block *block = access.block;
                 if (block != NULL)
                 {
@@ -324,7 +349,7 @@ static gboolean on_resize(GtkWidget *widget, GtkAllocation *event, gpointer user
         gtk_image_set_from_pixbuf(GTK_IMAGE(vr->image), new_pixbuf);
         vr->pixbuf = new_pixbuf;
         g_object_unref(new_pixbuf); /* The GtkImage holds a ref for us */
-        update_region(*vr);
+        update_region(vr);
     }
     return FALSE;
 }
@@ -343,9 +368,9 @@ int main(int argc, char **argv)
     if (!dg_view_load(argv[1]))
         return 1;
 
-    build_main_window(main_viewer);
-    prepare_min_max(main_viewer.region);
-    update_region(main_viewer.region);
+    build_main_window(&main_viewer);
+    prepare_min_max(&main_viewer.region);
+    update_region(&main_viewer.region);
     gtk_main();
     return 0;
 }
