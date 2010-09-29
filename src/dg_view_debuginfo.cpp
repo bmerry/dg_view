@@ -162,7 +162,7 @@ void dg_view_load_object_file(const char *filename, HWord text_avma)
     }
 }
 
-struct addr2line_info
+struct addr2info_info
 {
     HWord addr;
     object_file *obj;
@@ -173,9 +173,9 @@ struct addr2line_info
     unsigned int line;
 };
 
-static void addr2line_section(bfd *abfd, asection *sect, void *arg)
+static void addr2info_section(bfd *abfd, asection *sect, void *arg)
 {
-    addr2line_info *info = (addr2line_info *) arg;
+    addr2info_info *info = (addr2info_info *) arg;
 
     if (info->found)
         return;
@@ -198,16 +198,18 @@ static void addr2line_section(bfd *abfd, asection *sect, void *arg)
     info->found = true;
 }
 
-string dg_view_addr2line(HWord addr)
+void dg_view_addr2info(HWord addr, string &function, string &file, int &line, string &dso)
 {
-    ostringstream label;
-    label << hex << showbase << addr << dec << noshowbase;
+    function = "";
+    file = "";
+    line = 0;
+    dso = "";
     for (map<string, object_file *>::iterator i = object_files.begin(); i != object_files.end(); ++i)
     {
         object_file *of = i->second;
         if (addr >= of->text_avma)
         {
-            addr2line_info info;
+            addr2info_info info;
 
             info.addr = addr;
             info.obj = of;
@@ -218,39 +220,59 @@ string dg_view_addr2line(HWord addr)
                 if (osf == NULL) continue;
 
                 info.sub = osf;
-                bfd_map_over_sections(osf->abfd, addr2line_section, &info);
+                bfd_map_over_sections(osf->abfd, addr2info_section, &info);
                 if (info.found)
                 {
+                    dso = i->first;
                     if (info.function != NULL && info.function[0])
                     {
                         char *demangled = bfd_demangle(osf->abfd, info.function, 0);
                         if (demangled != NULL)
                         {
-                            label << " in " << demangled;
+                            function = demangled;
                             free(demangled);
                         }
                         else
-                            label << " in " << info.function;
+                            function = info.function;
                     }
-                    label << " (";
-                    if (info.source)
+                    if (info.source != NULL)
                     {
-                        const char *suffix = strrchr(info.source, '/');
-                        if (suffix == NULL)
-                            suffix = info.source;
-                        else
-                            suffix++; /* Skip over the last / */
-                        label << suffix;
-                        if (info.line != 0)
-                            label << ":" << info.line;
+                        file = info.source;
+                        line = info.line;
                     }
-                    else
-                        label << i->first;
-                    label << ")";
-                    return label.str();
+                    return;
                 }
             }
         }
     }
+}
+
+string dg_view_addr2line(HWord addr)
+{
+    string function, file, dso;
+    int line;
+
+    dg_view_addr2info(addr, function, file, line, dso);
+
+    ostringstream label;
+    label << hex << showbase << addr << dec << noshowbase;
+
+    if (!function.empty())
+        label << " in " << function;
+
+    if (!file.empty())
+    {
+        const char *suffix = strrchr(file.c_str(), '/');
+        if (suffix == NULL)
+            suffix = file.c_str();
+        else
+            suffix++; /* Skip over the last / */
+        label << " (" << suffix;
+        if (line != 0)
+            label << ":" << line;
+        label << ")";
+    }
+    else if (!dso.empty())
+        label << " (" << dso << ")";
     return label.str();
 }

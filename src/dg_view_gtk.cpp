@@ -37,6 +37,20 @@
 
 using namespace std;
 
+struct stack_trace_view
+{
+    GtkWidget *view;        /* GtkTreeView */
+    GtkListStore *store;
+};
+
+enum stack_trace_column
+{
+    STC_ADDR = 0,
+    STC_FILE,
+    STC_LINE,
+    STC_DSO
+};
+
 struct viewer;
 
 struct viewer_region
@@ -61,6 +75,8 @@ struct viewer
     viewer_region region;
 
     GtkWidget *addr_entry; /* GtkEntry - displays access address */
+    stack_trace_view access_stack;  /* Stack trace where the access occurred */
+    stack_trace_view malloc_stack;  /* Stack trace where the memory was allocated */
 };
 
 static gboolean on_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data);
@@ -105,6 +121,130 @@ static void build_region(viewer *v, viewer_region *vr, int width, int height)
     gdk_pixbuf_fill(vr->pixbuf, 0x00000000);
 }
 
+/* Display an address in hex */
+static void filter_stack_trace(GtkTreeModel *model,
+                               GtkTreeIter *iter,
+                               GValue *value,
+                               gint column,
+                               gpointer data)
+{
+    GtkTreeModel *child_model;
+    GtkTreeIter child_iter;
+
+    child_model = gtk_tree_model_filter_get_model(GTK_TREE_MODEL_FILTER(model));
+    gtk_tree_model_filter_convert_iter_to_child_iter(GTK_TREE_MODEL_FILTER(model), &child_iter, iter);
+    switch (column)
+    {
+    case STC_ADDR:
+        {
+            ostringstream o;
+            guint64 a;
+            gtk_tree_model_get(child_model, &child_iter, STC_ADDR, &a, -1);
+            o << showbase << hex << a;
+            g_value_set_string(value, o.str().c_str());
+        }
+        break;
+    case STC_LINE:
+        {
+            gint l;
+            gtk_tree_model_get(child_model, &child_iter, STC_LINE, &l, -1);
+            if (l == 0)
+                g_value_set_string(value, "");
+            else
+            {
+                ostringstream o;
+                o << l;
+                g_value_set_string(value, o.str().c_str());
+            }
+        }
+        break;
+    case STC_FILE:
+    case STC_DSO:
+        {
+            /* Display only the basename of filenames */
+            gchar *name;
+            gchar *suffix;
+
+            gtk_tree_model_get(child_model, &child_iter, column, &name, -1);
+            suffix = g_strrstr(name, G_DIR_SEPARATOR_S);
+            if (suffix == NULL)
+                suffix = name;
+            else
+                suffix++; /* Skip last '/' */
+            g_value_set_string(value, suffix);
+            g_free(name);
+        }
+        break;
+    default:
+        g_value_unset(value);
+        gtk_tree_model_get_value(child_model, &child_iter, column, value);
+        break;
+    }
+}
+
+/* Builds a tree view for a stack trace */
+static void build_stack_trace_view(stack_trace_view *stv)
+{
+    GtkWidget *view;
+    GtkListStore *store;
+    GtkCellRenderer *cell;
+    GtkTreeViewColumn *column;
+    GtkTreeModel *filter;
+
+    const gint ncolumns = 4;
+    GType store_types[ncolumns] =
+    {
+        G_TYPE_UINT64,  /* Address */
+        G_TYPE_STRING,  /* Filename */
+        G_TYPE_INT,     /* Line number */
+        G_TYPE_STRING   /* DSO */
+    };
+    GType filter_types[ncolumns] =
+    {
+        G_TYPE_STRING,
+        G_TYPE_STRING,
+        G_TYPE_STRING,
+        G_TYPE_STRING
+    };
+
+    store = gtk_list_store_newv(ncolumns, store_types);
+
+    filter = gtk_tree_model_filter_new(GTK_TREE_MODEL(store), NULL);
+    gtk_tree_model_filter_set_modify_func(GTK_TREE_MODEL_FILTER(filter),
+                                          ncolumns, filter_types,
+                                          filter_stack_trace, NULL, NULL);
+
+    view = gtk_tree_view_new_with_model(filter);
+    g_object_unref(filter); /* View holds a ref */
+
+    cell = gtk_cell_renderer_text_new();
+    column = gtk_tree_view_column_new_with_attributes("Address", cell,
+                                                      "text", STC_ADDR,
+                                                      NULL);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(view), column);
+
+    cell = gtk_cell_renderer_text_new();
+    column = gtk_tree_view_column_new_with_attributes("File", cell,
+                                                      "text", STC_FILE,
+                                                      NULL);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(view), column);
+
+    cell = gtk_cell_renderer_text_new();
+    column = gtk_tree_view_column_new_with_attributes("Line", cell,
+                                                      "text", STC_LINE,
+                                                      NULL);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(view), column);
+
+    cell = gtk_cell_renderer_text_new();
+    column = gtk_tree_view_column_new_with_attributes("DSO", cell,
+                                                      "text", STC_DSO,
+                                                      NULL);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(view), column);
+
+    stv->view = view;
+    stv->store = store;
+}
+
 static void build_main_window(viewer *v)
 {
     GtkWidget *table;
@@ -125,8 +265,11 @@ static void build_main_window(viewer *v)
     table = gtk_table_new(1, 1, FALSE);
     gtk_table_attach_defaults(GTK_TABLE(table), v->region.events, 0, 1, 0, 1);
 
+    build_stack_trace_view(&v->access_stack);
+
     info_box = gtk_vbox_new(FALSE, 0);
     gtk_box_pack_start(GTK_BOX(info_box), v->addr_entry, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(info_box), v->access_stack.view, FALSE, FALSE, 0);
 
     top_box = gtk_hbox_new(FALSE, 0);
     gtk_box_pack_start(GTK_BOX(top_box), table, TRUE, TRUE, 0);
@@ -321,13 +464,28 @@ static gboolean on_release(GtkWidget *widget, GdkEventButton *event, gpointer us
                 else
                     printf("\n");
 
+                gtk_list_store_clear(vr->owner->access_stack.store);
                 if (!access.stack.empty())
                 {
                     printf("At\n");
                     for (size_t i = 0; i < access.stack.size();i++)
                     {
+                        GtkTreeIter iter;
+                        gtk_list_store_append(vr->owner->access_stack.store, &iter);
+                        /*
                         string loc = dg_view_addr2line(access.stack[i]);
                         printf("  %s\n", loc.c_str());
+                        */
+                        guint64 addr = access.stack[i];
+                        string function, file, dso;
+                        int line;
+                        dg_view_addr2info(access.stack[i], function, file, line, dso);
+                        gtk_list_store_set(vr->owner->access_stack.store, &iter,
+                                           STC_ADDR, addr,
+                                           STC_FILE, file.c_str(),
+                                           STC_LINE, (gint) line,
+                                           STC_DSO, dso.c_str(),
+                                           -1);
                     }
                 }
             }

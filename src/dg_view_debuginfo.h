@@ -31,6 +31,11 @@
 /* Load symbols from an object file, overriding the actual VMA of .text. */
 void dg_view_load_object_file(const char *filename, HWord text_avma);
 
+/* Turn a code address into a machine-readable location.
+ * Unknown fields are set to empty/zero.
+ */
+void dg_view_addr2info(HWord addr, std::string &function, std::string &file, int &line, std::string &dso);
+
 /* Turn a code address into a human-friendly form */
 std::string dg_view_addr2line(HWord addr);
 
