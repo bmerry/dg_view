@@ -561,7 +561,6 @@ static gboolean on_resize(GtkWidget *widget, GtkAllocation *event, gpointer user
 int main(int argc, char **argv)
 {
     viewer main_viewer;
-    g_thread_init(NULL);
     gtk_init(&argc, &argv);
 
     dg_view_parse_opts(&argc, argv);
