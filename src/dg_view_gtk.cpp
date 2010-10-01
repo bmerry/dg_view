@@ -75,7 +75,11 @@ struct viewer
     GtkWidget *window; /* GtkWindow */
     viewer_region region;
 
-    GtkWidget *addr_entry; /* GtkEntry - displays access address */
+    GtkWidget *addr_entry;       /* GtkEntry - displays access address */
+    GtkWidget *block_addr_entry; /* GtkEntry - displays base of memory block */
+    GtkWidget *block_size_entry; /* GtkEntry - displays size of memory block */
+    GtkWidget *block_offset_entry; /* GtkEntry - displays offset of address in block */
+
     stack_trace_view access_stack;  /* Stack trace where the access occurred */
     stack_trace_view block_stack;  /* Stack trace where the memory was allocated */
 };
@@ -307,6 +311,30 @@ static void build_main_window(viewer *v)
 
     frame = gtk_frame_new("Memory block");
     frame_box = gtk_vbox_new(FALSE, 0);
+
+    label = gtk_label_new("Address");
+    gtk_misc_set_alignment(GTK_MISC(label), 0.0f, 0.0f);
+    gtk_box_pack_start(GTK_BOX(frame_box), label, FALSE, FALSE, 0);
+    v->block_addr_entry = gtk_entry_new();
+    gtk_entry_set_editable(GTK_ENTRY(v->block_addr_entry), FALSE);
+    gtk_entry_set_width_chars(GTK_ENTRY(v->block_addr_entry), 19);
+    gtk_box_pack_start(GTK_BOX(frame_box), v->block_addr_entry, FALSE, FALSE, 0);
+
+    label = gtk_label_new("Size");
+    gtk_misc_set_alignment(GTK_MISC(label), 0.0f, 0.0f);
+    gtk_box_pack_start(GTK_BOX(frame_box), label, FALSE, FALSE, 0);
+    v->block_size_entry = gtk_entry_new();
+    gtk_entry_set_editable(GTK_ENTRY(v->block_size_entry), FALSE);
+    gtk_entry_set_width_chars(GTK_ENTRY(v->block_size_entry), 10);
+    gtk_box_pack_start(GTK_BOX(frame_box), v->block_size_entry, FALSE, FALSE, 0);
+
+    label = gtk_label_new("Offset");
+    gtk_misc_set_alignment(GTK_MISC(label), 0.0f, 0.0f);
+    gtk_box_pack_start(GTK_BOX(frame_box), label, FALSE, FALSE, 0);
+    v->block_offset_entry = gtk_entry_new();
+    gtk_entry_set_editable(GTK_ENTRY(v->block_offset_entry), FALSE);
+    gtk_entry_set_width_chars(GTK_ENTRY(v->block_offset_entry), 10);
+    gtk_box_pack_start(GTK_BOX(frame_box), v->block_offset_entry, FALSE, FALSE, 0);
 
     label = gtk_label_new("Stack trace");
     gtk_misc_set_alignment(GTK_MISC(label), 0.0f, 0.0f);
@@ -599,11 +627,26 @@ static gboolean on_release(GtkWidget *widget, GdkEventButton *event, gpointer us
                 mem_block *block = access.block;
                 if (block != NULL)
                 {
+                    addr_str.str("");
+                    addr_str << block->addr;
+                    gtk_entry_set_text(GTK_ENTRY(vr->owner->block_addr_entry), addr_str.str().c_str());
+
+                    ostringstream size_str;
+                    size_str << block->size;
+                    gtk_entry_set_text(GTK_ENTRY(vr->owner->block_size_entry), size_str.str().c_str());
+
+                    ostringstream offset_str;
+                    offset_str << access.addr - block->addr;
+                    gtk_entry_set_text(GTK_ENTRY(vr->owner->block_offset_entry), offset_str.str().c_str());
+
                     stack_trace_view_populate(&vr->owner->block_stack, block->stack);
                 }
                 else
                 {
                     /* Clear it */
+                    gtk_entry_set_text(GTK_ENTRY(vr->owner->block_addr_entry), "");
+                    gtk_entry_set_text(GTK_ENTRY(vr->owner->block_size_entry), "");
+                    gtk_entry_set_text(GTK_ENTRY(vr->owner->block_offset_entry), "");
                     stack_trace_view_populate(&vr->owner->block_stack, vector<HWord>());
                 }
 
