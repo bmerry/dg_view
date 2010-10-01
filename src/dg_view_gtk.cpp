@@ -344,6 +344,20 @@ static void prepare_min_max(viewer_region *vr)
     vr->iseq_max = last_bbrun->iseq_start + last_bbdef.accesses.back().iseq + 1;
 }
 
+/* Takes an address in a semantic space and gives the nearest pixel.
+ * Returns false if it falls outside the viewport.
+ */
+static bool location_to_pixel(double a, double view_min, double view_max,
+                              int pixels, int &out)
+{
+    if (a <= view_min || a >= view_max)
+        return false;
+    double scale = pixels / (view_max - view_min);
+    out = (int) floor((a - view_min) * scale + 0.5);
+    out = max(min(out, pixels - 1), 0);
+    return true;
+}
+
 /* Takes a range in a semantic space and gives first and last pixels covered.
  * The return values are a [first, last) range. Returns false if there is
  * no intersection with the viewport.
@@ -364,6 +378,64 @@ static bool range_to_pixels(double lo, double hi,
     return true;
 }
 
+static void update_region_vlines(viewer_region *vr)
+{
+    int rowstride = gdk_pixbuf_get_rowstride(vr->pixbuf);
+    guchar *pixels = gdk_pixbuf_get_pixels(vr->pixbuf);
+    int width = gdk_pixbuf_get_width(vr->pixbuf);
+    int height = gdk_pixbuf_get_height(vr->pixbuf);
+    int n_channels = gdk_pixbuf_get_n_channels(vr->pixbuf);
+
+    g_return_if_fail(n_channels == 3);
+    g_return_if_fail(gdk_pixbuf_get_colorspace(vr->pixbuf) == GDK_COLORSPACE_RGB);
+    g_return_if_fail(gdk_pixbuf_get_bits_per_sample(vr->pixbuf) == 8);
+
+    const float xrate = (vr->addr_max - vr->addr_min) / width;
+    const page_map &pm = dg_view_page_map();
+    const uint8_t color_cut[3] = {192, 192, 192};
+    const uint8_t color_page[3] = {64, 64, 64};
+    const uint8_t color_cache[3] = {96, 32, 32};
+    int x;
+    HWord last = 0;
+    for (page_map::const_iterator i = pm.begin(); i != pm.end(); ++i)
+    {
+        if (i->first != last + DG_VIEW_PAGE_SIZE)
+        {
+            if (location_to_pixel(i->second, vr->addr_min, vr->addr_max, width, x))
+            {
+                unsigned int ofs = n_channels * x;
+                for (int j = 0; j < height; j++, ofs += rowstride)
+                    for (int k = 0; k < 3; k++)
+                        pixels[ofs + k] = color_cut[k];
+            }
+        }
+        else if (xrate < DG_VIEW_PAGE_SIZE / 8)
+        {
+            if (location_to_pixel(i->second, vr->addr_min, vr->addr_max, width, x))
+            {
+                unsigned int ofs = n_channels * x;
+                for (int j = 0; j < height; j++, ofs += rowstride)
+                    for (int k = 0; k < 3; k++)
+                        pixels[ofs + k] = color_page[k];
+            }
+        }
+        if (xrate < DG_VIEW_LINE_SIZE / 8)
+        {
+            for (int c = DG_VIEW_LINE_SIZE; c < DG_VIEW_PAGE_SIZE; c += DG_VIEW_LINE_SIZE)
+            {
+                if (location_to_pixel(i->second + c, vr->addr_min, vr->addr_max, width, x))
+                {
+                    unsigned int ofs = n_channels * x;
+                    for (int j = 0; j < height; j++, ofs += rowstride)
+                        for (int k = 0; k < 3; k++)
+                            pixels[ofs + k] = color_cache[k];
+                }
+            }
+        }
+        last = i->first;
+    }
+}
+
 static void update_region(viewer_region *vr)
 {
     int rowstride = gdk_pixbuf_get_rowstride(vr->pixbuf);
@@ -376,6 +448,8 @@ static void update_region(viewer_region *vr)
     g_return_if_fail(gdk_pixbuf_get_colorspace(vr->pixbuf) == GDK_COLORSPACE_RGB);
     g_return_if_fail(gdk_pixbuf_get_bits_per_sample(vr->pixbuf) == 8);
     gdk_pixbuf_fill(vr->pixbuf, 0);
+
+    update_region_vlines(vr);
 
     const bbrun_list &bbruns = dg_view_bbruns();
     for (bbrun_list::const_iterator bbr = bbruns.begin(); bbr != bbruns.end(); ++bbr)
