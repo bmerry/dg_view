@@ -337,7 +337,7 @@ static void prepare_min_max(viewer_region *vr)
     const page_map &pages = dg_view_page_map();
     vr->addr_min = pages.begin()->second;
     vr->addr_max = (--pages.end())->second + DG_VIEW_PAGE_SIZE;
-    vr->iseq_min = 0;
+    vr->iseq_min = bbruns.begin()->iseq_start;
 
     bbrun_list::const_iterator last_bbrun = --bbruns.end();
     const bbdef &last_bbdef = dg_view_bbrun_get_bbdef(*last_bbrun);
