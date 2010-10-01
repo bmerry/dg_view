@@ -247,6 +247,29 @@ void dg_view_addr2info(HWord addr, string &function, string &file, int &line, st
     }
 }
 
+/* Takes a full path and returns a short form of it for display by stripping
+ * paths
+ */
+string dg_view_abbrev_file(const string &full)
+{
+    const char *suffix = strrchr(full.c_str(), '/');
+    if (suffix == NULL)
+        return full;
+    else
+    {
+        suffix++; /* Skip over the last / */
+        return suffix;
+    }
+}
+
+/* Like dg_view_abbrev_file, but takes the name of a DSO. Currently
+ * equivalent.
+ */
+string dg_view_abbrev_dso(const string &full)
+{
+    return dg_view_abbrev_file(full);
+}
+
 string dg_view_addr2line(HWord addr)
 {
     string function, file, dso;
@@ -262,17 +285,12 @@ string dg_view_addr2line(HWord addr)
 
     if (!file.empty())
     {
-        const char *suffix = strrchr(file.c_str(), '/');
-        if (suffix == NULL)
-            suffix = file.c_str();
-        else
-            suffix++; /* Skip over the last / */
-        label << " (" << suffix;
+        label << " (" << dg_view_abbrev_file(file);
         if (line != 0)
             label << ":" << line;
         label << ")";
     }
     else if (!dso.empty())
-        label << " (" << dso << ")";
+        label << " (" << dg_view_abbrev_dso(dso) << ")";
     return label.str();
 }

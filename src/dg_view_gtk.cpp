@@ -164,20 +164,21 @@ static void filter_stack_trace(GtkTreeModel *model,
         }
         break;
     case STC_FILE:
+        {
+            gchar *name;
+            gtk_tree_model_get(child_model, &child_iter, column, &name, -1);
+            string abbrev = dg_view_abbrev_file(name);
+            g_free(name);
+            g_value_set_string(value, abbrev.c_str());
+        }
+        break;
     case STC_DSO:
         {
-            /* Display only the basename of filenames */
             gchar *name;
-            gchar *suffix;
-
             gtk_tree_model_get(child_model, &child_iter, column, &name, -1);
-            suffix = g_strrstr(name, G_DIR_SEPARATOR_S);
-            if (suffix == NULL)
-                suffix = name;
-            else
-                suffix++; /* Skip last '/' */
-            g_value_set_string(value, suffix);
+            string abbrev = dg_view_abbrev_dso(name);
             g_free(name);
+            g_value_set_string(value, abbrev.c_str());
         }
         break;
     default:

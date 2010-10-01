@@ -213,7 +213,7 @@ static mem_block *find_block(HWord addr)
     return block;
 }
 
-static bool keep_access(HWord addr, uint8_t size)
+static bool keep_access(HWord addr, uint8_t size, mem_block *block)
 {
     bool matched;
     if (!chosen_events.empty() && active_events.empty())
@@ -229,11 +229,47 @@ static bool keep_access(HWord addr, uint8_t size)
                 break;
             }
         }
+        if (!matched && block != NULL)
+        {
+            /* Check for fn:, file: and dso: labels */
+            for (size_t i = 0; i < block->stack.size(); i++)
+            {
+                string function, file, dso;
+                int line;
+                dg_view_addr2info(block->stack[i], function, file, line, dso);
+                if (!function.empty())
+                {
+                    if (chosen_ranges.count("fn:" + function))
+                    {
+                        matched = true;
+                        break;
+                    }
+                }
+                if (!file.empty())
+                {
+                    file = dg_view_abbrev_file(file);
+                    if (chosen_ranges.count("file:" + file))
+                    {
+                        matched = true;
+                        break;
+                    }
+                }
+                if (!dso.empty())
+                {
+                    dso = dg_view_abbrev_dso(dso);
+                    if (chosen_ranges.count("dso:" + dso))
+                    {
+                        matched = true;
+                        break;
+                    }
+                }
+            }
+        }
     }
     else
         matched = true;
 
-    if (matched && malloc_only && find_block(addr) == NULL)
+    if (matched && malloc_only && block == NULL)
         matched = false;
 
     return matched;
@@ -376,13 +412,14 @@ bool dg_view_load(const char *filename)
                             HWord addr = rp->extract_word();
                             const bbdef_access &access = bbd.accesses[i];
 
-                            bool keep = keep_access(addr, access.size);
+                            mem_block *block = find_block(addr);
+                            bool keep = keep_access(addr, access.size, block);
                             if (keep)
                             {
                                 keep_any = true;
                                 fwd_page_map[page_round_down(addr)] = 0;
                                 bbr.addrs[i] = addr;
-                                bbr.blocks[i] = find_block(addr);
+                                bbr.blocks[i] = block;
                             }
                             else
                             {

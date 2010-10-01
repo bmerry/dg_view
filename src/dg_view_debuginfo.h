@@ -39,4 +39,14 @@ void dg_view_addr2info(HWord addr, std::string &function, std::string &file, int
 /* Turn a code address into a human-friendly form */
 std::string dg_view_addr2line(HWord addr);
 
+/* Takes a full path and returns a short form of it for display by stripping
+ * paths
+ */
+std::string dg_view_abbrev_file(const std::string &full);
+
+/* Like dg_view_abbrev_file, but takes the name of a DSO. Currently
+ * equivalent.
+ */
+std::string dg_view_abbrev_dso(const std::string &full);
+
 #endif /* __DG_VIEW_DEBUGINFO_H */
