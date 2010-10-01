@@ -356,7 +356,7 @@ static bool range_to_pixels(double lo, double hi,
         return false;
     double scale = pixels / (view_max - view_min);
     pixel_lo = (int) floor((lo - view_min) * scale + 0.5);
-    pixel_hi = (int) floor((hi - view_min) * scale + 0.f);
+    pixel_hi = (int) floor((hi - view_min) * scale + 0.5);
     if (pixel_hi == pixel_lo)
         pixel_hi++;
     pixel_lo = max(pixel_lo, 0);
