@@ -188,6 +188,57 @@ static void filter_stack_trace(GtkTreeModel *model,
     }
 }
 
+static void stack_trace_row_activated(GtkTreeView *view,
+                                      GtkTreePath *path,
+                                      GtkTreeViewColumn *column,
+                                      gpointer user_data)
+{
+    stack_trace_view *stv = (stack_trace_view *) user_data;
+    GtkTreeIter iter;
+    gchar *file;
+    gint line;
+
+    gtk_tree_model_get_iter(GTK_TREE_MODEL(stv->store), &iter, path);
+    gtk_tree_model_get(GTK_TREE_MODEL(stv->store), &iter,
+                       STC_FILE, &file,
+                       STC_LINE, &line,
+                       -1);
+
+    if (file != NULL && file[0] != '\0' && line > 0)
+    {
+        GPid pid;
+        const gchar *argv[20];
+        ostringstream line_arg_s;
+        string line_arg;
+        int argc = 0;
+
+        line_arg_s << "+" << line << '\n';
+        line_arg = line_arg_s.str();
+
+        argv[argc++] = "gvim";
+        argv[argc++] = "-f";
+        argv[argc++] = "--servername";
+        argv[argc++] = "dg_view";
+        argv[argc++] = "--remote-silent";
+        argv[argc++] = line_arg.c_str();
+        argv[argc++] = file;
+        argv[argc] = NULL;
+        if (g_spawn_async(NULL,                     /* working_directory */
+                          (gchar **) argv,
+                          NULL,                     /* envp */
+                          G_SPAWN_SEARCH_PATH,
+                          NULL,                     /* child_setup */
+                          NULL,                     /* user_data */
+                          &pid,
+                          NULL))                    /* error */
+        {
+            g_spawn_close_pid(pid);
+        }
+    }
+
+    g_free(file);
+}
+
 /* Builds a tree view for a stack trace */
 static void build_stack_trace_view(stack_trace_view *stv)
 {
@@ -255,6 +306,9 @@ static void build_stack_trace_view(stack_trace_view *stv)
                                                       "text", STC_DSO,
                                                       NULL);
     gtk_tree_view_append_column(GTK_TREE_VIEW(view), column);
+
+    g_signal_connect(G_OBJECT(view), "row-activated",
+                     G_CALLBACK(stack_trace_row_activated), stv);
 
     scroll = gtk_scrolled_window_new(NULL, NULL);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
