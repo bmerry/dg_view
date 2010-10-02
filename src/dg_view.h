@@ -44,6 +44,7 @@ struct mem_block
     HWord size;
     std::vector<HWord> stack;
     std::string label;
+    bool matched;      /* Matches the requirements of -m, if any */
 };
 
 /* Not stored anywhere, only used to get information about accesses */

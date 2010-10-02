@@ -64,6 +64,21 @@ struct compare_bbrun_iseq
     }
 };
 
+/* Set of conditions to match stack traces against based on command-line options */
+struct condition_set
+{
+    uint32_t flags;         /* set-specific flags, not generically used */
+    set<string> user;
+    set<string> functions;
+    set<string> files;
+    set<string> dsos;
+    mutable map<HWord, bool> cache; /* cache for condition_set_match */
+};
+
+#define CONDITION_SET_FLAG_ANY           1U
+#define CONDITION_SET_FLAG_MALLOC        2U /* Any malloc-like function */
+#define CONDITION_SET_FLAG_RANGE         4U /* Any TRACK_RANGE request */
+
 static pool_allocator<HWord> hword_pool;
 static pool_allocator<mem_block *> mem_block_ptr_pool;
 
@@ -71,15 +86,14 @@ static pool_allocator<mem_block *> mem_block_ptr_pool;
 static multiset<string> active_events;
 /* All TRACK_RANGEs with no matching UNTRACK_RANGE from chosen_ranges */
 static multiset<pair<HWord, HWord> > active_ranges;
-static bool malloc_only = false;
 
 static rangemap<HWord, mem_block *> block_map;
 static vector<mem_block *> block_storage;
 
-/* Events selected on the command line, or empty if there wasn't a choice */
-static set<string> chosen_events;
-/* Ranges selected on the command line, or empty if there wasn't a choice */
-static set<string> chosen_ranges;
+/* Events selected on the command line */
+static condition_set event_conditions;
+/* Ranges selected on the command line */
+static condition_set block_conditions;
 
 static vector<bbdef> bbdefs;
 static vector<bbrun> bbruns;
@@ -213,66 +227,71 @@ static mem_block *find_block(HWord addr)
     return block;
 }
 
-static bool keep_access(HWord addr, uint8_t size, mem_block *block)
+/* Checks whether a condition specified by a condition_set is met. It does not
+ * include user events or the flags.
+ */
+static bool condition_set_match(const condition_set &cs, const vector<HWord> &stack)
 {
-    bool matched;
-    if (!chosen_events.empty() && active_events.empty())
-        matched = false;
-    else if (!chosen_ranges.empty())
+    if (cs.functions.empty() && cs.files.empty() && cs.dsos.empty())
+        return false;
+    for (size_t i = 0; i < stack.size(); i++)
     {
-        matched = false;
-        for (multiset<pair<HWord, HWord> >::const_iterator i = active_ranges.begin(); i != active_ranges.end(); ++i)
+        map<HWord, bool>::iterator pos = cs.cache.lower_bound(stack[i]);
+        if (pos != cs.cache.end() && pos->first == stack[i])
         {
-            if (addr + size > i->first && addr < i->first + i->second)
-            {
-                matched = true;
-                break;
-            }
+            if (pos->second)
+                return true;
+            else
+                continue;
         }
-        if (!matched && block != NULL)
+
+        bool match = false;
+        string function, file, dso;
+        int line;
+        dg_view_addr2info(stack[i], function, file, line, dso);
+        if ((!function.empty() && cs.functions.count(function))
+            || (!file.empty() && cs.files.count(file))
+            || (!dso.empty() && cs.dsos.count(dso)))
         {
-            /* Check for fn:, file: and dso: labels */
-            for (size_t i = 0; i < block->stack.size(); i++)
-            {
-                string function, file, dso;
-                int line;
-                dg_view_addr2info(block->stack[i], function, file, line, dso);
-                if (!function.empty())
-                {
-                    if (chosen_ranges.count("fn:" + function))
-                    {
-                        matched = true;
-                        break;
-                    }
-                }
-                if (!file.empty())
-                {
-                    file = dg_view_abbrev_file(file);
-                    if (chosen_ranges.count("file:" + file))
-                    {
-                        matched = true;
-                        break;
-                    }
-                }
-                if (!dso.empty())
-                {
-                    dso = dg_view_abbrev_dso(dso);
-                    if (chosen_ranges.count("dso:" + dso))
-                    {
-                        matched = true;
-                        break;
-                    }
-                }
-            }
+            match = true;
         }
+        cs.cache.insert(pos, make_pair(stack[i], match));
+        if (match)
+            return true;
     }
-    else
-        matched = true;
 
-    if (matched && malloc_only && block == NULL)
-        matched = false;
+    return false;
+}
 
-    return matched;
+/* Whether a memory access matches the range conditions */
+static bool keep_access_block(HWord addr, uint8_t size, mem_block *block)
+{
+    if (block_conditions.flags & CONDITION_SET_FLAG_ANY)
+        return true;
+    if (block != NULL && block->matched)
+        return true;
+
+    for (multiset<pair<HWord, HWord> >::const_iterator i = active_ranges.begin(); i != active_ranges.end(); ++i)
+        if (addr + size > i->first && addr < i->first + i->second)
+            return true;
+
+    return false;
+}
+
+/* Whether a memory access matches the event conditions */
+static bool keep_access_event(const vector<HWord> &stack)
+{
+    if (event_conditions.flags & CONDITION_SET_FLAG_ANY)
+        return true;
+    if (!active_events.empty())
+        return true;
+
+    return condition_set_match(event_conditions, stack);
+}
+
+static bool keep_access(HWord addr, uint8_t size, const vector<HWord> &stack, mem_block *block)
+{
+    return keep_access_block(addr, size, block) && keep_access_event(stack);
 }
 
 bool dg_view_load(const char *filename)
@@ -407,13 +426,15 @@ bool dg_view_load(const char *filename)
                         bbr.n_addrs = n_addrs;
                         bbr.addrs = hword_pool.alloc(n_addrs);
                         bbr.blocks = mem_block_ptr_pool.alloc(n_addrs);
+                        vector<HWord> stack = ctx.stack;
                         for (HWord i = 0; i < n_addrs; i++)
                         {
                             HWord addr = rp->extract_word();
                             const bbdef_access &access = bbd.accesses[i];
 
                             mem_block *block = find_block(addr);
-                            bool keep = keep_access(addr, access.size, block);
+                            stack[0] = bbd.instr_addrs[access.iseq];
+                            bool keep = keep_access(addr, access.size, stack, block);
                             if (keep)
                             {
                                 keep_any = true;
@@ -442,7 +463,8 @@ bool dg_view_load(const char *filename)
                         string var_type = rp->extract_string();
                         string label = rp->extract_string();
 
-                        if (chosen_ranges.count(label))
+                        if (block_conditions.user.count(label)
+                            || (block_conditions.flags & CONDITION_SET_FLAG_RANGE))
                             active_ranges.insert(make_pair(addr, size));
                     }
                     break;
@@ -473,6 +495,10 @@ bool dg_view_load(const char *filename)
                             HWord stack_addr = rp->extract_word();
                             block->stack.push_back(stack_addr);
                         }
+                        block->matched = false;
+                        if (block_conditions.flags & (CONDITION_SET_FLAG_ANY | CONDITION_SET_FLAG_MALLOC)
+                            || condition_set_match(block_conditions, block->stack))
+                            block->matched = true;
                         block_storage.push_back(block);
                         block_map.insert(addr, addr + size, block);
                     }
@@ -487,7 +513,7 @@ bool dg_view_load(const char *filename)
                 case DG_R_END_EVENT:
                     {
                         string label = rp->extract_string();
-                        if (chosen_events.count(label))
+                        if (event_conditions.user.count(label))
                         {
                             if (type == DG_R_START_EVENT)
                                 active_events.insert(label);
@@ -617,6 +643,37 @@ static vector<string> split_comma(const string &s)
     }
 }
 
+static void condition_set_parse(condition_set &cs, const vector<string> &tokens, uint32_t valid_flags)
+{
+    for (vector<string>::const_iterator i = tokens.begin(); i != tokens.end(); ++i)
+    {
+        const string &s = *i;
+        if (valid_flags & CONDITION_SET_FLAG_MALLOC)
+        {
+            if (s == "malloc")
+                cs.flags |= CONDITION_SET_FLAG_MALLOC;
+        }
+        else if (valid_flags & CONDITION_SET_FLAG_RANGE)
+        {
+            if (s == "range")
+                cs.flags |= CONDITION_SET_FLAG_RANGE;
+        }
+        else if (s.substr(0, 3) == "fn:")
+            cs.functions.insert(s.substr(3));
+        else if (s.substr(0, 5) == "file:")
+            cs.files.insert(s.substr(5));
+        else if (s.substr(0, 4) == "dso:")
+            cs.dsos.insert(s.substr(4));
+        else if (s.substr(0, 5) == "user:")
+            cs.user.insert(s.substr(5));
+        else
+        {
+            fprintf(stderr, "Invalid condition `%s'\n", s.c_str());
+            exit(2);
+        }
+    }
+}
+
 void dg_view_parse_opts(int *argc, char **argv)
 {
     static const struct option longopts[] =
@@ -628,6 +685,8 @@ void dg_view_parse_opts(int *argc, char **argv)
     };
     int opt;
 
+    event_conditions.flags = CONDITION_SET_FLAG_ANY;
+    block_conditions.flags = CONDITION_SET_FLAG_ANY;
     while ((opt = getopt_long(*argc, argv, "r:e:m", longopts, NULL)) != -1)
     {
         switch (opt)
@@ -635,17 +694,16 @@ void dg_view_parse_opts(int *argc, char **argv)
         case 'r':
             {
                 vector<string> ranges = split_comma(optarg);
-                chosen_ranges = set<string>(ranges.begin(), ranges.end());
+                condition_set_parse(block_conditions, ranges, CONDITION_SET_FLAG_MALLOC | CONDITION_SET_FLAG_RANGE);
+                block_conditions.flags &= ~CONDITION_SET_FLAG_ANY;
             }
             break;
         case 'e':
             {
                 vector<string> events = split_comma(optarg);
-                chosen_events = set<string>(events.begin(), events.end());
+                condition_set_parse(event_conditions, events, 0);
+                event_conditions.flags &= ~CONDITION_SET_FLAG_ANY;
             }
-            break;
-        case 'm':
-            malloc_only = true;
             break;
         case '?':
         case ':':
@@ -654,6 +712,9 @@ void dg_view_parse_opts(int *argc, char **argv)
             assert(0);
         }
     }
+
+    event_conditions.cache.clear();
+    block_conditions.cache.clear();
 
     /* Remove options from argv */
     for (int i = optind; i < *argc; i++)
