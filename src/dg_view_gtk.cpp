@@ -54,16 +54,23 @@ enum stack_trace_column
 
 struct viewer;
 
+struct dimension
+{
+    double cached_min;
+    double cached_max;
+    GtkAdjustment *adj;
+};
+
 struct viewer_region
 {
     viewer *owner;
 
     GtkWidget *image;   /* GtkImage */
     GtkWidget *events;  /* GtkEventBox */
+    GtkWidget *top;     /* Top-level widget to add to parents */
     GdkPixbuf *pixbuf;
 
-    double addr_min, addr_max;
-    double iseq_min, iseq_max;
+    dimension dims[2];
 
     int click_x;
     int click_y;
@@ -75,20 +82,41 @@ struct viewer
     GtkWidget *window; /* GtkWindow */
     viewer_region region;
 
-    GtkWidget *addr_entry;       /* GtkEntry - displays access address */
-    GtkWidget *block_addr_entry; /* GtkEntry - displays base of memory block */
-    GtkWidget *block_size_entry; /* GtkEntry - displays size of memory block */
+    GtkAdjustment *addr_adj;
+    GtkAdjustment *iseq_adj;
+
+    GtkWidget *addr_entry;         /* GtkEntry - displays access address */
+    GtkWidget *block_addr_entry;   /* GtkEntry - displays base of memory block */
+    GtkWidget *block_size_entry;   /* GtkEntry - displays size of memory block */
     GtkWidget *block_offset_entry; /* GtkEntry - displays offset of address in block */
 
-    stack_trace_view access_stack;  /* Stack trace where the access occurred */
+    stack_trace_view access_stack; /* Stack trace where the access occurred */
     stack_trace_view block_stack;  /* Stack trace where the memory was allocated */
 };
 
 static gboolean on_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data);
 static gboolean on_release(GtkWidget *widget, GdkEventButton *event, gpointer user_data);
 static gboolean on_resize(GtkWidget *widget, GtkAllocation *event, gpointer user_data);
+static void on_view_changed(GtkAdjustment *adj, gpointer user_data);
 
-static void build_region(viewer *v, viewer_region *vr, int width, int height)
+static inline double viewer_region_min(const viewer_region *vr, int d)
+{
+    return gtk_adjustment_get_value(vr->dims[d].adj);
+}
+
+static inline double viewer_region_range(const viewer_region *vr, int d)
+{
+    return gtk_adjustment_get_page_size(vr->dims[d].adj);
+}
+
+static inline double viewer_region_max(const viewer_region *vr, int d)
+{
+    return viewer_region_min(vr, d) + viewer_region_range(vr, d);
+}
+
+static void build_region(viewer *v, viewer_region *vr,
+                         int width, int height,
+                         GtkAdjustment *addr_adj, GtkAdjustment *iseq_adj)
 {
     vr->owner = v;
     vr->pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, width, height);
@@ -97,6 +125,7 @@ static void build_region(viewer *v, viewer_region *vr, int width, int height)
         fprintf(stderr, "Could not allocate a %d x %d pixbuf\n", width, height);
         exit(1);
     }
+    gdk_pixbuf_fill(vr->pixbuf, 0x00000000);
 
     vr->image = gtk_image_new_from_pixbuf(vr->pixbuf);
     if (vr->image == NULL)
@@ -105,6 +134,7 @@ static void build_region(viewer *v, viewer_region *vr, int width, int height)
         exit(1);
     }
     g_object_unref(vr->pixbuf); /* vr->image will hold a ref for us */
+    gtk_widget_set_size_request(vr->image, width, height);
 
     vr->events = gtk_event_box_new();
     if (vr->events == NULL)
@@ -113,17 +143,42 @@ static void build_region(viewer *v, viewer_region *vr, int width, int height)
         exit(1);
     }
     gtk_widget_add_events(vr->events, GDK_BUTTON_PRESS_MASK);
+    gtk_container_add(GTK_CONTAINER(vr->events), vr->image);
+
     g_signal_connect(G_OBJECT(vr->events), "button-press-event",
                      G_CALLBACK(on_press), vr);
     g_signal_connect(G_OBJECT(vr->events), "button-release-event",
                      G_CALLBACK(on_release), vr);
     g_signal_connect(G_OBJECT(vr->events), "size-allocate",
                      G_CALLBACK(on_resize), vr);
-    gtk_container_add(GTK_CONTAINER(vr->events), vr->image);
+    vr->dims[0].adj = addr_adj;
+    vr->dims[1].adj = iseq_adj;
+    for (int i = 0; i < 2; i++)
+    {
+        vr->dims[i].cached_min = -1.0;  // mark cache invalid
+        vr->dims[i].cached_max = -1.0;
+        g_signal_connect(G_OBJECT(vr->dims[i].adj), "changed",
+                         G_CALLBACK(on_view_changed), vr);
+        g_signal_connect(G_OBJECT(vr->dims[i].adj), "value-changed",
+                         G_CALLBACK(on_view_changed), vr);
+    }
 
-    gtk_widget_set_size_request(vr->image, width, height);
 
-    gdk_pixbuf_fill(vr->pixbuf, 0x00000000);
+    GtkWidget *hscroll = gtk_hscrollbar_new(vr->dims[0].adj);
+    GtkWidget *vscroll = gtk_vscrollbar_new(vr->dims[1].adj);
+    vr->top = gtk_table_new(2, 2, FALSE);
+    gtk_table_attach(GTK_TABLE(vr->top), vr->events, 0, 1, 0, 1,
+                     (GtkAttachOptions) (GTK_EXPAND | GTK_FILL),
+                     (GtkAttachOptions) (GTK_EXPAND | GTK_FILL),
+                     0, 0);
+    gtk_table_attach(GTK_TABLE(vr->top), hscroll, 0, 1, 1, 2,
+                     (GtkAttachOptions) (GTK_EXPAND | GTK_FILL),
+                     (GtkAttachOptions) 0,
+                     0, 0);
+    gtk_table_attach(GTK_TABLE(vr->top), vscroll, 1, 2, 0, 1,
+                     (GtkAttachOptions) 0,
+                     (GtkAttachOptions) (GTK_EXPAND | GTK_FILL),
+                     0, 0);
 }
 
 /* Display an address in hex */
@@ -321,6 +376,29 @@ static void build_stack_trace_view(stack_trace_view *stv)
     stv->store = store;
 }
 
+static void prepare_min_max(viewer *v)
+{
+    const bbrun_list &bbruns = dg_view_bbruns();
+    const page_map &pages = dg_view_page_map();
+
+    double addr_min = pages.begin()->second;
+    double addr_max = (--pages.end())->second + DG_VIEW_PAGE_SIZE;
+    double iseq_min = bbruns.begin()->iseq_start;
+
+    bbrun_list::const_iterator last_bbrun = --bbruns.end();
+    const bbdef &last_bbdef = dg_view_bbrun_get_bbdef(*last_bbrun);
+    double iseq_max = last_bbrun->iseq_start + last_bbdef.accesses.back().iseq + 1;
+
+    v->addr_adj = GTK_ADJUSTMENT(gtk_adjustment_new(addr_min, addr_min, addr_max,
+                                                    addr_max - addr_min,
+                                                    0.1 * (addr_max - addr_min),
+                                                    addr_max - addr_min));
+    v->iseq_adj = GTK_ADJUSTMENT(gtk_adjustment_new(iseq_min, iseq_min, iseq_max,
+                                                    iseq_max - iseq_min,
+                                                    0.1 * (iseq_max - iseq_min),
+                                                    iseq_max - iseq_min));
+}
+
 static void build_main_window(viewer *v)
 {
     GtkWidget *table;
@@ -330,12 +408,16 @@ static void build_main_window(viewer *v)
     GtkWidget *frame_box;
     GtkWidget *label;
 
+    prepare_min_max(v);
+
+    /*** Window ***/
+
     v->window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(v->window), "dg_view");
     g_signal_connect(G_OBJECT(v->window), "destroy",
                      G_CALLBACK(gtk_main_quit), NULL);
 
-    build_region(v, &v->region, 600, 600);
+    build_region(v, &v->region, 600, 600, v->addr_adj, v->iseq_adj);
     build_stack_trace_view(&v->access_stack);
     build_stack_trace_view(&v->block_stack);
 
@@ -402,7 +484,7 @@ static void build_main_window(viewer *v)
     /*** Main region ***/
 
     table = gtk_table_new(1, 1, FALSE);
-    gtk_table_attach_defaults(GTK_TABLE(table), v->region.events, 0, 1, 0, 1);
+    gtk_table_attach_defaults(GTK_TABLE(table), v->region.top, 0, 1, 0, 1);
 
     /*** Stitch it all together ***/
 
@@ -412,19 +494,6 @@ static void build_main_window(viewer *v)
 
     gtk_container_add(GTK_CONTAINER(v->window), top_box);
     gtk_widget_show_all(v->window);
-}
-
-static void prepare_min_max(viewer_region *vr)
-{
-    const bbrun_list &bbruns = dg_view_bbruns();
-    const page_map &pages = dg_view_page_map();
-    vr->addr_min = pages.begin()->second;
-    vr->addr_max = (--pages.end())->second + DG_VIEW_PAGE_SIZE;
-    vr->iseq_min = bbruns.begin()->iseq_start;
-
-    bbrun_list::const_iterator last_bbrun = --bbruns.end();
-    const bbdef &last_bbdef = dg_view_bbrun_get_bbdef(*last_bbrun);
-    vr->iseq_max = last_bbrun->iseq_start + last_bbdef.accesses.back().iseq + 1;
 }
 
 /* Takes an address in a semantic space and gives the nearest pixel.
@@ -473,7 +542,9 @@ static void update_region_vlines(viewer_region *vr)
     g_return_if_fail(gdk_pixbuf_get_colorspace(vr->pixbuf) == GDK_COLORSPACE_RGB);
     g_return_if_fail(gdk_pixbuf_get_bits_per_sample(vr->pixbuf) == 8);
 
-    const float xrate = (vr->addr_max - vr->addr_min) / width;
+    const double addr_min = viewer_region_min(vr, 0);
+    const double addr_max = viewer_region_max(vr, 0);
+    const double xrate = viewer_region_range(vr, 0) / width;
     const page_map &pm = dg_view_page_map();
     const uint8_t color_cut[3] = {192, 192, 192};
     const uint8_t color_page[3] = {64, 64, 64};
@@ -484,7 +555,7 @@ static void update_region_vlines(viewer_region *vr)
     {
         if (i->first != last + DG_VIEW_PAGE_SIZE)
         {
-            if (location_to_pixel(i->second, vr->addr_min, vr->addr_max, width, x))
+            if (location_to_pixel(i->second, addr_min, addr_max, width, x))
             {
                 unsigned int ofs = n_channels * x;
                 for (int j = 0; j < height; j++, ofs += rowstride)
@@ -494,7 +565,7 @@ static void update_region_vlines(viewer_region *vr)
         }
         else if (xrate < DG_VIEW_PAGE_SIZE / 8)
         {
-            if (location_to_pixel(i->second, vr->addr_min, vr->addr_max, width, x))
+            if (location_to_pixel(i->second, addr_min, addr_max, width, x))
             {
                 unsigned int ofs = n_channels * x;
                 for (int j = 0; j < height; j++, ofs += rowstride)
@@ -506,7 +577,7 @@ static void update_region_vlines(viewer_region *vr)
         {
             for (int c = DG_VIEW_LINE_SIZE; c < DG_VIEW_PAGE_SIZE; c += DG_VIEW_LINE_SIZE)
             {
-                if (location_to_pixel(i->second + c, vr->addr_min, vr->addr_max, width, x))
+                if (location_to_pixel(i->second + c, addr_min, addr_max, width, x))
                 {
                     unsigned int ofs = n_channels * x;
                     for (int j = 0; j < height; j++, ofs += rowstride)
@@ -535,6 +606,10 @@ static void update_region(viewer_region *vr)
     update_region_vlines(vr);
 
     const bbrun_list &bbruns = dg_view_bbruns();
+    const double addr_min = viewer_region_min(vr, 0);
+    const double addr_max = viewer_region_max(vr, 0);
+    const double iseq_min = viewer_region_min(vr, 1);
+    const double iseq_max = viewer_region_max(vr, 1);
     for (bbrun_list::const_iterator bbr = bbruns.begin(); bbr != bbruns.end(); ++bbr)
     {
         for (size_t j = 0; j < bbr->n_addrs; j++)
@@ -549,10 +624,10 @@ static void update_region(viewer_region *vr)
                 int x1, x2, y1, y2;
 
                 if (range_to_pixels(addr, addr + bbda.size,
-                                    vr->addr_min, vr->addr_max, width,
+                                    addr_min, addr_max, width,
                                     x1, x2) &&
                     range_to_pixels(iseq, iseq + 1,
-                                    vr->iseq_min, vr->iseq_max, height,
+                                    iseq_min, iseq_max, height,
                                     y1, y2))
                 {
                     for (int y = y1; y < y2; y++)
@@ -576,6 +651,28 @@ static void update_region(viewer_region *vr)
     }
 
     gtk_widget_queue_draw(vr->image);
+
+    for (int i = 0; i < 2; i++)
+    {
+        vr->dims[i].cached_min = gtk_adjustment_get_value(vr->dims[i].adj);
+        vr->dims[i].cached_max = vr->dims[i].cached_min + gtk_adjustment_get_page_size(vr->dims[i].adj);
+    }
+}
+
+static void on_view_changed(GtkAdjustment *adj, gpointer user_data)
+{
+    viewer_region *vr = (viewer_region *) user_data;
+    bool dirty = false;
+
+    for (int i = 0; i < 2; i++)
+    {
+        double min = gtk_adjustment_get_value(vr->dims[i].adj);
+        double max = min + gtk_adjustment_get_page_size(vr->dims[i].adj);
+        if (vr->dims[i].cached_min != min || vr->dims[i].cached_max != max)
+            dirty = true;
+    }
+    if (dirty)
+        update_region(vr);
 }
 
 static gboolean on_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data)
@@ -589,10 +686,10 @@ static gboolean on_press(GtkWidget *widget, GdkEventButton *event, gpointer user
     return FALSE;
 }
 
-/* Computes new values for amin and amax (which are in an abstract space,
- * based on two coordinates of a zoom box in a window space [0, size).
+/* Computes new values for dimension, based on two coordinates of a zoom box in
+ * a window space [0, size).
  */
-static void update_zoom(double *amin, double *amax, int w1, int w2, int size)
+static void update_zoom(dimension *dim, int w1, int w2, int size)
 {
     /* Convert to pixel centers */
     double l = min(w1, w2) + 0.5;
@@ -613,9 +710,14 @@ static void update_zoom(double *amin, double *amax, int w1, int w2, int size)
     h = min(h, 1.0);
 
     /* Interpolate to get new coordinates */
-    double old_size = *amax - *amin;
-    *amax = *amin + h * old_size;
-    *amin = *amin + l * old_size;
+    double old_size = gtk_adjustment_get_page_size(dim->adj);
+    double page_size = old_size * (h - l);
+    double value = gtk_adjustment_get_value(dim->adj) + l * old_size;
+
+    gtk_adjustment_set_page_size(dim->adj, page_size);
+    gtk_adjustment_set_page_increment(dim->adj, page_size);
+    gtk_adjustment_set_step_increment(dim->adj, 0.1 * page_size);
+    gtk_adjustment_set_value(dim->adj, value);
 }
 
 static void stack_trace_view_populate(stack_trace_view *stv, const vector<HWord> &st)
@@ -652,25 +754,28 @@ static gboolean on_release(GtkWidget *widget, GdkEventButton *event, gpointer us
         if (abs(event->x - vr->click_x) > 2 && abs(event->y - vr->click_y) > 2)
         {
             /* Assume it was a drag to zoom */
-            update_zoom(&vr->addr_min, &vr->addr_max,
-                        vr->click_x, event->x, width);
-            update_zoom(&vr->iseq_min, &vr->iseq_max,
-                        vr->click_y, event->y, height);
-            update_region(vr);
+            g_object_freeze_notify(G_OBJECT(vr->dims[0].adj));
+            g_object_freeze_notify(G_OBJECT(vr->dims[1].adj));
+            update_zoom(&vr->dims[0], vr->click_x, event->x, width);
+            update_zoom(&vr->dims[1], vr->click_y, event->y, height);
+            g_object_thaw_notify(G_OBJECT(vr->dims[1].adj));
+            g_object_thaw_notify(G_OBJECT(vr->dims[0].adj));
         }
         else
         {
             /* A click to get information */
-            double addr_size = vr->addr_max - vr->addr_min;
-            double iseq_size = vr->iseq_max - vr->iseq_min;
+            const double addr_min = viewer_region_min(vr, 0);
+            const double addr_size = viewer_region_range(vr, 0);
+            const double iseq_min = viewer_region_min(vr, 1);
+            const double iseq_size = viewer_region_range(vr, 1);
 
             double addr_scale = addr_size / width;
             double iseq_scale = iseq_size / height;
             double ratio = iseq_scale / addr_scale;
 
-            HWord remapped = (HWord) (0.5 + (event->x + 0.5) * addr_scale + vr->addr_min);
+            HWord remapped = (HWord) (0.5 + (event->x + 0.5) * addr_scale + addr_min);
             HWord addr = dg_view_revmap_addr(remapped);
-            double iseq = (event->y + 0.5) * iseq_scale + vr->iseq_min;
+            double iseq = (event->y + 0.5) * iseq_scale + iseq_min;
 
             mem_access access = dg_view_nearest_access(addr, iseq, ratio);
             if (access.size != 0)
@@ -744,7 +849,6 @@ int main(int argc, char **argv)
         return 1;
 
     build_main_window(&main_viewer);
-    prepare_min_max(&main_viewer.region);
     update_region(&main_viewer.region);
     gtk_main();
     return 0;
