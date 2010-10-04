@@ -40,6 +40,7 @@
 #include <utility>
 #include <map>
 #include <stdexcept>
+#include <iostream>
 
 template<typename Address, typename Data>
 class rangemap
@@ -141,9 +142,10 @@ typename rangemap<Address, Data>::iterator rangemap<Address, Data>::insert(const
         --low;
         if (low->first.second > value.first.first)
         {
-            printf("(%#lx,%#lx) overlaps (%#lx,%#lx)\n",
-                   low->first.first, low->first.second,
-                   value.first.first, value.first.second);
+            std::cerr
+                << "(" << low->first.first << "," << low->first.second << ")"
+                << " overlaps "
+                << "(" << value.first.first << "," << value.first.second << ")\n";
             throw std::invalid_argument("Overlapping ranges");
         }
     }

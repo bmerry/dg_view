@@ -22,6 +22,8 @@
    The GNU General Public License is contained in the file COPYING.
 */
 
+#define __STDC_FORMAT_MACROS 1
+#include <inttypes.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -580,8 +582,8 @@ bool dg_view_load(const char *filename)
     printf("  %zu bbdefs\n"
            "  %zu bbruns\n"
            "  %zu contexts\n"
-           "  %zu instrs (approx)\n"
-           "  %zu accesses\n",
+           "  %" PRIu64 " instrs (approx)\n"
+           "  %" PRIu64 " accesses\n",
            bbdefs.size(),
            bbruns.size(),
            contexts.size(),
