@@ -650,16 +650,10 @@ static void condition_set_parse(condition_set &cs, const vector<string> &tokens,
     for (vector<string>::const_iterator i = tokens.begin(); i != tokens.end(); ++i)
     {
         const string &s = *i;
-        if (valid_flags & CONDITION_SET_FLAG_MALLOC)
-        {
-            if (s == "malloc")
-                cs.flags |= CONDITION_SET_FLAG_MALLOC;
-        }
-        else if (valid_flags & CONDITION_SET_FLAG_RANGE)
-        {
-            if (s == "range")
-                cs.flags |= CONDITION_SET_FLAG_RANGE;
-        }
+        if ((valid_flags & CONDITION_SET_FLAG_MALLOC) && s == "malloc")
+            cs.flags |= CONDITION_SET_FLAG_MALLOC;
+        else if ((valid_flags & CONDITION_SET_FLAG_RANGE) && s == "range")
+            cs.flags |= CONDITION_SET_FLAG_RANGE;
         else if (s.substr(0, 3) == "fn:")
             cs.functions.insert(s.substr(3));
         else if (s.substr(0, 5) == "file:")
