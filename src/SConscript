@@ -42,7 +42,7 @@ elif env['config'] == 'release':
 elif env['config'] == 'optimized':
     env.Append(CCFLAGS = ['-g', '-O2'], LINKFLAGS = ['-g'])
 
-env.Program('dg_view_gtk', source = [
+env.Program('dg_view', source = [
     'dg_view_core.cpp',
     'dg_view_debuginfo.cpp',
     'dg_view_parse.cpp',
