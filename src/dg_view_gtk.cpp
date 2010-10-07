@@ -79,7 +79,7 @@ struct viewer_region
 
 struct viewer
 {
-    GtkWidget *window; /* GtkWindow */
+    GtkWidget *window;             /* GtkWindow */
     viewer_region region;
 
     GtkAdjustment *addr_adj;
@@ -98,6 +98,10 @@ static gboolean on_press(GtkWidget *widget, GdkEventButton *event, gpointer user
 static gboolean on_release(GtkWidget *widget, GdkEventButton *event, gpointer user_data);
 static gboolean on_resize(GtkWidget *widget, GtkAllocation *event, gpointer user_data);
 static void on_view_changed(GtkAdjustment *adj, gpointer user_data);
+static void on_zoom_out_addr(GtkToolButton *button, gpointer user_data);
+static void on_zoom_in_addr(GtkToolButton *button, gpointer user_data);
+static void on_zoom_out_iseq(GtkToolButton *button, gpointer user_data);
+static void on_zoom_in_iseq(GtkToolButton *button, gpointer user_data);
 
 static inline double viewer_region_min(const viewer_region *vr, int d)
 {
@@ -399,31 +403,39 @@ static void prepare_min_max(viewer *v)
                                                     iseq_max - iseq_min));
 }
 
-static void build_main_window(viewer *v)
+static GtkWidget *build_toolbar(viewer *v)
 {
-    GtkWidget *table;
-    GtkWidget *top_box;
-    GtkWidget *info_box;
-    GtkWidget *frame;
-    GtkWidget *frame_box;
-    GtkWidget *label;
+    GtkWidget *toolbar;
+    GtkToolItem *button;
 
-    prepare_min_max(v);
+    toolbar = gtk_toolbar_new();
 
-    /*** Window ***/
+    button = gtk_tool_button_new_from_stock(GTK_STOCK_ZOOM_IN);
+    g_signal_connect(G_OBJECT(button), "clicked",
+                     G_CALLBACK(on_zoom_in_addr), v);
+    gtk_toolbar_insert(GTK_TOOLBAR(toolbar), button, -1);
+    button = gtk_tool_button_new_from_stock(GTK_STOCK_ZOOM_OUT);
+    g_signal_connect(G_OBJECT(button), "clicked",
+                     G_CALLBACK(on_zoom_out_addr), v);
+    gtk_toolbar_insert(GTK_TOOLBAR(toolbar), button, -1);
 
-    v->window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title(GTK_WINDOW(v->window), "dg_view");
-    g_signal_connect(G_OBJECT(v->window), "destroy",
-                     G_CALLBACK(gtk_main_quit), NULL);
+    gtk_toolbar_insert(GTK_TOOLBAR(toolbar), gtk_separator_tool_item_new(), -1);
 
-    build_region(v, &v->region, 600, 600, v->addr_adj, v->iseq_adj);
-    build_stack_trace_view(&v->access_stack);
-    build_stack_trace_view(&v->block_stack);
+    button = gtk_tool_button_new_from_stock(GTK_STOCK_ZOOM_IN);
+    g_signal_connect(G_OBJECT(button), "clicked",
+                     G_CALLBACK(on_zoom_in_iseq), v);
+    gtk_toolbar_insert(GTK_TOOLBAR(toolbar), button, -1);
+    button = gtk_tool_button_new_from_stock(GTK_STOCK_ZOOM_OUT);
+    g_signal_connect(G_OBJECT(button), "clicked",
+                     G_CALLBACK(on_zoom_out_iseq), v);
+    gtk_toolbar_insert(GTK_TOOLBAR(toolbar), button, -1);
 
-    info_box = gtk_vbox_new(FALSE, 0);
+    return toolbar;
+}
 
-    /*** Access frame ***/
+static GtkWidget *build_access_frame(viewer *v)
+{
+    GtkWidget *frame, *frame_box, *label;
 
     frame = gtk_frame_new("Access");
     frame_box = gtk_vbox_new(FALSE, 0);
@@ -442,9 +454,12 @@ static void build_main_window(viewer *v)
     gtk_box_pack_start(GTK_BOX(frame_box), v->access_stack.view, TRUE, TRUE, 0);
 
     gtk_container_add(GTK_CONTAINER(frame), frame_box);
-    gtk_box_pack_start(GTK_BOX(info_box), frame, TRUE, TRUE, 0);
+    return frame;
+}
 
-    /*** Memory block frame */
+static GtkWidget *build_block_frame(viewer *v)
+{
+    GtkWidget *frame, *frame_box, *label;
 
     frame = gtk_frame_new("Memory block");
     frame_box = gtk_vbox_new(FALSE, 0);
@@ -479,20 +494,53 @@ static void build_main_window(viewer *v)
     gtk_box_pack_start(GTK_BOX(frame_box), v->block_stack.view, TRUE, TRUE, 0);
 
     gtk_container_add(GTK_CONTAINER(frame), frame_box);
+    return frame;
+}
+
+static void build_main_window(viewer *v)
+{
+    GtkWidget *table, *body_box, *info_box, *all_box, *toolbar, *frame;
+
+    prepare_min_max(v);
+
+    /*** Window ***/
+
+    v->window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_window_set_title(GTK_WINDOW(v->window), "dg_view");
+    g_signal_connect(G_OBJECT(v->window), "destroy",
+                     G_CALLBACK(gtk_main_quit), NULL);
+
+    build_region(v, &v->region, 600, 600, v->addr_adj, v->iseq_adj);
+    build_stack_trace_view(&v->access_stack);
+    build_stack_trace_view(&v->block_stack);
+
+    all_box = gtk_vbox_new(FALSE, 0);
+    body_box = gtk_hbox_new(FALSE, 0);
+    info_box = gtk_vbox_new(FALSE, 0);
+
+    /*** Access frame ***/
+    frame = build_access_frame(v);
+    gtk_box_pack_start(GTK_BOX(info_box), frame, TRUE, TRUE, 0);
+
+    /*** Memory block frame */
+    frame = build_block_frame(v);
     gtk_box_pack_start(GTK_BOX(info_box), frame, TRUE, TRUE, 0);
 
     /*** Main region ***/
-
     table = gtk_table_new(1, 1, FALSE);
     gtk_table_attach_defaults(GTK_TABLE(table), v->region.top, 0, 1, 0, 1);
 
+    /*** Toolbar ***/
+    toolbar = build_toolbar(v);
+
     /*** Stitch it all together ***/
 
-    top_box = gtk_hbox_new(FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(top_box), table, TRUE, TRUE, 0);
-    gtk_box_pack_start(GTK_BOX(top_box), info_box, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(body_box), table, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(body_box), info_box, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(all_box), toolbar, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(all_box), body_box, TRUE, TRUE, 0);
 
-    gtk_container_add(GTK_CONTAINER(v->window), top_box);
+    gtk_container_add(GTK_CONTAINER(v->window), all_box);
     gtk_widget_show_all(v->window);
 }
 
@@ -688,8 +736,12 @@ static gboolean on_press(GtkWidget *widget, GdkEventButton *event, gpointer user
 
 /* Computes new values for dimension, based on two coordinates of a zoom box in
  * a window space [0, size).
+ *
+ * If massage is true, the zoom area is expanded slightly then clamped. It
+ * should be true when doing click-and-drag zooming, and false when zooming
+ * in response to toolbar buttons.
  */
-static void update_zoom(dimension *dim, int w1, int w2, int size)
+static void update_zoom(dimension *dim, int w1, int w2, int size, bool massage)
 {
     /* Convert to pixel centers */
     double l = min(w1, w2) + 0.5;
@@ -699,21 +751,29 @@ static void update_zoom(dimension *dim, int w1, int w2, int size)
     l /= size;
     h /= size;
 
-    double scale = h - l;
-    /* Expand slightly so that some context is visible */
-    double expand = 0.1f * scale;
-    l -= expand;
-    h += expand;
+    if (massage)
+    {
+        double scale = h - l;
+        /* Expand slightly so that some context is visible */
+        double expand = 0.1f * scale;
+        l -= expand;
+        h += expand;
 
-    /* Clamp to the window */
-    l = max(l, 0.0);
-    h = min(h, 1.0);
+        /* Clamp to the window */
+        l = max(l, 0.0);
+        h = min(h, 1.0);
+    }
 
     /* Interpolate to get new coordinates */
     double old_size = gtk_adjustment_get_page_size(dim->adj);
-    double page_size = old_size * (h - l);
     double value = gtk_adjustment_get_value(dim->adj) + l * old_size;
+    double end = value + old_size * (h - l);
 
+    /* Clamp to maximum range of adjustment */
+    value = max(value, gtk_adjustment_get_lower(dim->adj));
+    end = min(end, gtk_adjustment_get_upper(dim->adj));
+
+    double page_size = end - value;
     gtk_adjustment_set_page_size(dim->adj, page_size);
     gtk_adjustment_set_page_increment(dim->adj, page_size);
     gtk_adjustment_set_step_increment(dim->adj, 0.1 * page_size);
@@ -756,8 +816,8 @@ static gboolean on_release(GtkWidget *widget, GdkEventButton *event, gpointer us
             /* Assume it was a drag to zoom */
             g_object_freeze_notify(G_OBJECT(vr->dims[0].adj));
             g_object_freeze_notify(G_OBJECT(vr->dims[1].adj));
-            update_zoom(&vr->dims[0], vr->click_x, event->x, width);
-            update_zoom(&vr->dims[1], vr->click_y, event->y, height);
+            update_zoom(&vr->dims[0], vr->click_x, event->x, width, true);
+            update_zoom(&vr->dims[1], vr->click_y, event->y, height, true);
             g_object_thaw_notify(G_OBJECT(vr->dims[1].adj));
             g_object_thaw_notify(G_OBJECT(vr->dims[0].adj));
         }
@@ -833,6 +893,46 @@ static gboolean on_resize(GtkWidget *widget, GtkAllocation *event, gpointer user
         update_region(vr);
     }
     return FALSE;
+}
+
+static void on_zoom_out_addr(GtkToolButton *button, gpointer user_data)
+{
+    viewer *v = (viewer *) user_data;
+    viewer_region *vr = &v->region;
+
+    g_object_freeze_notify(G_OBJECT(vr->dims[0].adj));
+    update_zoom(&vr->dims[0], -1, 3, 2, false);
+    g_object_thaw_notify(G_OBJECT(vr->dims[0].adj));
+}
+
+static void on_zoom_in_addr(GtkToolButton *button, gpointer user_data)
+{
+    viewer *v = (viewer *) user_data;
+    viewer_region *vr = &v->region;
+
+    g_object_freeze_notify(G_OBJECT(vr->dims[0].adj));
+    update_zoom(&vr->dims[0], 1, 3, 4, false);
+    g_object_thaw_notify(G_OBJECT(vr->dims[0].adj));
+}
+
+static void on_zoom_out_iseq(GtkToolButton *button, gpointer user_data)
+{
+    viewer *v = (viewer *) user_data;
+    viewer_region *vr = &v->region;
+
+    g_object_freeze_notify(G_OBJECT(vr->dims[1].adj));
+    update_zoom(&vr->dims[1], -1, 3, 2, false);
+    g_object_thaw_notify(G_OBJECT(vr->dims[1].adj));
+}
+
+static void on_zoom_in_iseq(GtkToolButton *button, gpointer user_data)
+{
+    viewer *v = (viewer *) user_data;
+    viewer_region *vr = &v->region;
+
+    g_object_freeze_notify(G_OBJECT(vr->dims[1].adj));
+    update_zoom(&vr->dims[1], 1, 3, 4, false);
+    g_object_thaw_notify(G_OBJECT(vr->dims[1].adj));
 }
 
 int main(int argc, char **argv)
