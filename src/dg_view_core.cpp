@@ -676,14 +676,13 @@ void dg_view_parse_opts(int *argc, char **argv)
     {
         { "ranges", 1, NULL, 'r' },
         { "events", 1, NULL, 'e' },
-        { "malloc-only", 0, NULL, 'm' },
         { NULL, 0, NULL, 0 }
     };
     int opt;
 
     event_conditions.flags = CONDITION_SET_FLAG_ANY;
     block_conditions.flags = CONDITION_SET_FLAG_ANY;
-    while ((opt = getopt_long(*argc, argv, "r:e:m", longopts, NULL)) != -1)
+    while ((opt = getopt_long(*argc, argv, "r:e:", longopts, NULL)) != -1)
     {
         switch (opt)
         {
