@@ -42,12 +42,9 @@ elif env['config'] == 'release':
 elif env['config'] == 'optimized':
     env.Append(CCFLAGS = ['-g', '-O2'], LINKFLAGS = ['-g'])
 
-common = env.Object([
-    'dg_view.cpp',
+env.Program('dg_view_gtk', source = [
+    'dg_view_core.cpp',
     'dg_view_debuginfo.cpp',
-    'dg_view_parse.cpp'])
-
-env.Program('dg_view_gl', source = [common, 'dg_view_gl.cpp'],
-    LIBS = ['$LIBS', 'GLEW', 'glut', 'GL'])
-env.Program('dg_view_gtk', source = [common, 'dg_view_gtk.cpp'],
+    'dg_view_parse.cpp',
+    'dg_view_gtk.cpp'],
     parse_flags = '!pkg-config --cflags --libs gtk+-2.0 gdk-pixbuf-2.0')
