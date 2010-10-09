@@ -54,15 +54,78 @@ enum stack_trace_column
 
 struct viewer;
 
-struct dimension
+class viewer_region
 {
-    double cached_min;
-    double cached_max;
-    GtkAdjustment *adj;
-};
+public:
+    class dimension
+    {
+    private:
+        double cached_lower;
+        double cached_upper;
+        GtkAdjustment *adj;
 
-struct viewer_region
-{
+        // Prevent copying, since it will mess up the refcounting
+        dimension(const dimension &);
+        dimension &operator=(const dimension &);
+    public:
+        dimension() : cached_lower(-1.0), cached_upper(-1.0), adj(NULL)
+        {
+            // The initializers mark the cache as dirty
+        }
+
+        double range() const
+        {
+            return gtk_adjustment_get_page_size(adj);
+        }
+
+        double lower() const
+        {
+            return gtk_adjustment_get_value(adj);
+        }
+
+        double upper() const
+        {
+            return lower() + range();
+        }
+
+        GtkAdjustment *get_adjustment() const
+        {
+            return adj;
+        }
+
+        void init(viewer_region *owner, GtkAdjustment *adj);
+
+        bool cache_dirty() const
+        {
+            return cached_lower != lower() || cached_upper != upper();
+        }
+
+        void update_cache()
+        {
+            cached_lower = lower();
+            cached_upper = upper();
+        }
+
+        void update(int w1, int w2, int size, bool massage);
+
+        void freeze()
+        {
+            g_object_freeze_notify(G_OBJECT(adj));
+        }
+
+        void thaw()
+        {
+            g_object_thaw_notify(G_OBJECT(adj));
+        }
+
+        ~dimension()
+        {
+            if (this->adj != NULL)
+                g_object_unref(this->adj);
+        }
+    };
+
+private:
     viewer *owner;
 
     GtkWidget *image;   /* GtkImage */
@@ -70,11 +133,38 @@ struct viewer_region
     GtkWidget *top;     /* Top-level widget to add to parents */
     GdkPixbuf *pixbuf;
 
-    dimension dims[2];
-
     int click_x;
     int click_y;
     bool in_click;
+
+    dimension dims[2];
+
+    /* Prevent copying */
+    viewer_region &operator=(const viewer_region &);
+    viewer_region(const viewer_region &);
+
+    void update_lines();
+
+public:
+    viewer *get_owner() const { return owner; }
+    GtkWidget *get_widget() const { return top; }
+    dimension *get_addr_dimension() { return &dims[0]; }
+    dimension *get_iseq_dimension() { return &dims[1]; }
+
+    void update();
+
+    void on_changed(GtkAdjustment *adj);
+    void on_press(GtkWidget *widget, GdkEventButton *event);
+    void on_release(GtkWidget *widget, GdkEventButton *event);
+    void on_resize(GtkWidget *widget, GtkAllocation *event);
+
+    viewer_region() : owner(NULL), image(NULL), events(NULL), top(NULL), pixbuf(NULL)
+    {
+    }
+    ~viewer_region();
+
+    void init(viewer *v, int width, int height,
+              GtkAdjustment *addr_adj, GtkAdjustment *iseq_adj);
 };
 
 struct viewer
@@ -94,98 +184,125 @@ struct viewer
     stack_trace_view block_stack;  /* Stack trace where the memory was allocated */
 };
 
-static gboolean on_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data);
-static gboolean on_release(GtkWidget *widget, GdkEventButton *event, gpointer user_data);
-static gboolean on_resize(GtkWidget *widget, GtkAllocation *event, gpointer user_data);
-static void on_view_changed(GtkAdjustment *adj, gpointer user_data);
-static void on_zoom_out_addr(GtkToolButton *button, gpointer user_data);
-static void on_zoom_in_addr(GtkToolButton *button, gpointer user_data);
-static void on_zoom_out_iseq(GtkToolButton *button, gpointer user_data);
-static void on_zoom_in_iseq(GtkToolButton *button, gpointer user_data);
+static gboolean viewer_region_on_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data);
+static gboolean viewer_region_on_release(GtkWidget *widget, GdkEventButton *event, gpointer user_data);
+static gboolean viewer_region_on_resize(GtkWidget *widget, GtkAllocation *event, gpointer user_data);
+static void viewer_region_on_changed(GtkAdjustment *adj, gpointer user_data);
+static void viewer_region_dimension_on_zoom_in(GtkAction *action, gpointer user_data);
+static void viewer_region_dimension_on_zoom_out(GtkAction *action, gpointer user_data);
 
-static inline double viewer_region_min(const viewer_region *vr, int d)
+void viewer_region::dimension::init(viewer_region *owner, GtkAdjustment *adj)
 {
-    return gtk_adjustment_get_value(vr->dims[d].adj);
+    g_return_if_fail(owner != NULL);
+    g_return_if_fail(adj != NULL);
+    g_return_if_fail(this->adj == NULL);
+
+    g_object_ref(adj);
+    this->adj = adj;
+
+    g_signal_connect(G_OBJECT(adj), "changed",
+                     G_CALLBACK(viewer_region_on_changed), owner);
+    g_signal_connect(G_OBJECT(adj), "value-changed",
+                     G_CALLBACK(viewer_region_on_changed), owner);
 }
 
-static inline double viewer_region_range(const viewer_region *vr, int d)
+/* Computes new values for dimension, based on two coordinates of a zoom box in
+ * a window space [0, size).
+ *
+ * If massage is true, the zoom area is expanded slightly then clamped. It
+ * should be true when doing click-and-drag zooming, and false when zooming
+ * in response to toolbar buttons.
+ *
+ * This method should be called between freeze() and thaw().
+ */
+void viewer_region::dimension::update(int w1, int w2, int size, bool massage)
 {
-    return gtk_adjustment_get_page_size(vr->dims[d].adj);
+    /* Convert to pixel centers */
+    double l = min(w1, w2) + 0.5;
+    double h = max(w1, w2) + 0.5;
+
+    /* Convert to parametric coordinates in [0, 1] */
+    l /= size;
+    h /= size;
+
+    if (massage)
+    {
+        double scale = h - l;
+        /* Expand slightly so that some context is visible */
+        double expand = 0.1f * scale;
+        l -= expand;
+        h += expand;
+
+        /* Clamp to the window */
+        l = max(l, 0.0);
+        h = min(h, 1.0);
+    }
+
+    /* Interpolate to get new coordinates */
+    double old_size = range();
+    double low = lower() + l * old_size;
+    double high = lower() + h * old_size;
+
+    /* Clamp to maximum range of adjustment */
+    low = max(low, gtk_adjustment_get_lower(adj));
+    high = min(high, gtk_adjustment_get_upper(adj));
+
+    double page_size = high - low;
+    gtk_adjustment_set_page_size(adj, page_size);
+    gtk_adjustment_set_page_increment(adj, page_size);
+    gtk_adjustment_set_step_increment(adj, 0.1 * page_size);
+    gtk_adjustment_set_value(adj, low);
 }
 
-static inline double viewer_region_max(const viewer_region *vr, int d)
-{
-    return viewer_region_min(vr, d) + viewer_region_range(vr, d);
-}
-
-static void build_region(viewer *v, viewer_region *vr,
-                         int width, int height,
+void viewer_region::init(viewer *v, int width, int height,
                          GtkAdjustment *addr_adj, GtkAdjustment *iseq_adj)
 {
-    vr->owner = v;
-    vr->pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, width, height);
-    if (vr->pixbuf == NULL)
-    {
-        fprintf(stderr, "Could not allocate a %d x %d pixbuf\n", width, height);
-        exit(1);
-    }
-    gdk_pixbuf_fill(vr->pixbuf, 0x00000000);
+    g_assert(owner == NULL);
+    owner = v;
 
-    vr->image = gtk_image_new_from_pixbuf(vr->pixbuf);
-    if (vr->image == NULL)
-    {
-        fprintf(stderr, "Could not allocate an image for the pixbuf\n");
-        exit(1);
-    }
-    g_object_unref(vr->pixbuf); /* vr->image will hold a ref for us */
-    gtk_widget_set_size_request(vr->image, width, height);
+    pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, width, height);
+    gdk_pixbuf_fill(pixbuf, 0x00000000);
 
-    vr->events = gtk_event_box_new();
-    if (vr->events == NULL)
-    {
-        fprintf(stderr, "Could not allocate an event box\n");
-        exit(1);
-    }
-    gtk_widget_add_events(vr->events, GDK_BUTTON_PRESS_MASK);
-    gtk_container_add(GTK_CONTAINER(vr->events), vr->image);
+    image = gtk_image_new_from_pixbuf(pixbuf);
+    g_object_unref(pixbuf); /* image will hold a ref for us */
+    gtk_widget_set_size_request(image, width, height);
 
-    g_signal_connect(G_OBJECT(vr->events), "button-press-event",
-                     G_CALLBACK(on_press), vr);
-    g_signal_connect(G_OBJECT(vr->events), "button-release-event",
-                     G_CALLBACK(on_release), vr);
-    g_signal_connect(G_OBJECT(vr->events), "size-allocate",
-                     G_CALLBACK(on_resize), vr);
-    vr->dims[0].adj = addr_adj;
-    vr->dims[1].adj = iseq_adj;
-    for (int i = 0; i < 2; i++)
-    {
-        vr->dims[i].cached_min = -1.0;  // mark cache invalid
-        vr->dims[i].cached_max = -1.0;
-        g_signal_connect(G_OBJECT(vr->dims[i].adj), "changed",
-                         G_CALLBACK(on_view_changed), vr);
-        g_signal_connect(G_OBJECT(vr->dims[i].adj), "value-changed",
-                         G_CALLBACK(on_view_changed), vr);
-    }
+    events = gtk_event_box_new();
+    gtk_widget_add_events(events, GDK_BUTTON_PRESS_MASK);
+    gtk_container_add(GTK_CONTAINER(events), image);
 
+    g_signal_connect(G_OBJECT(events), "button-press-event",
+                     G_CALLBACK(viewer_region_on_press), this);
+    g_signal_connect(G_OBJECT(events), "button-release-event",
+                     G_CALLBACK(viewer_region_on_release), this);
+    g_signal_connect(G_OBJECT(events), "size-allocate",
+                     G_CALLBACK(viewer_region_on_resize), this);
 
-    GtkWidget *hscroll = gtk_hscrollbar_new(vr->dims[0].adj);
-    GtkWidget *vscroll = gtk_vscrollbar_new(vr->dims[1].adj);
-    vr->top = gtk_table_new(2, 2, FALSE);
-    gtk_table_attach(GTK_TABLE(vr->top), vr->events, 0, 1, 0, 1,
+    dims[0].init(this, addr_adj);
+    dims[1].init(this, iseq_adj);
+
+    GtkWidget *hscroll = gtk_hscrollbar_new(addr_adj);
+    GtkWidget *vscroll = gtk_vscrollbar_new(iseq_adj);
+    top = gtk_table_new(2, 2, FALSE);
+    gtk_table_attach(GTK_TABLE(top), events, 0, 1, 0, 1,
                      (GtkAttachOptions) (GTK_EXPAND | GTK_FILL),
                      (GtkAttachOptions) (GTK_EXPAND | GTK_FILL),
                      0, 0);
-    gtk_table_attach(GTK_TABLE(vr->top), hscroll, 0, 1, 1, 2,
+    gtk_table_attach(GTK_TABLE(top), hscroll, 0, 1, 1, 2,
                      (GtkAttachOptions) (GTK_EXPAND | GTK_FILL),
                      (GtkAttachOptions) 0,
                      0, 0);
-    gtk_table_attach(GTK_TABLE(vr->top), vscroll, 1, 2, 0, 1,
+    gtk_table_attach(GTK_TABLE(top), vscroll, 1, 2, 0, 1,
                      (GtkAttachOptions) 0,
                      (GtkAttachOptions) (GTK_EXPAND | GTK_FILL),
                      0, 0);
 }
 
-/* Display an address in hex */
+viewer_region::~viewer_region()
+{
+}
+
+/* Display an address in hex, and abbreviate filenames */
 static void filter_stack_trace(GtkTreeModel *model,
                                GtkTreeIter *iter,
                                GValue *value,
@@ -329,6 +446,7 @@ static void build_stack_trace_view(stack_trace_view *stv)
     store = gtk_list_store_newv(ncolumns, store_types);
 
     filter = gtk_tree_model_filter_new(GTK_TREE_MODEL(store), NULL);
+    g_object_unref(store); /* Filter holds a ref */
     gtk_tree_model_filter_set_modify_func(GTK_TREE_MODEL_FILTER(filter),
                                           ncolumns, filter_types,
                                           filter_stack_trace, NULL, NULL);
@@ -403,33 +521,31 @@ static void prepare_min_max(viewer *v)
                                                     iseq_max - iseq_min));
 }
 
+static void build_toolbar_section(GtkToolbar *toolbar, viewer_region::dimension *dim)
+{
+    GtkToolItem *button;
+
+    button = gtk_tool_button_new_from_stock(GTK_STOCK_ZOOM_IN);
+    g_signal_connect(G_OBJECT(button), "clicked",
+                     G_CALLBACK(viewer_region_dimension_on_zoom_in), dim);
+    gtk_toolbar_insert(GTK_TOOLBAR(toolbar), button, -1);
+    button = gtk_tool_button_new_from_stock(GTK_STOCK_ZOOM_OUT);
+    g_signal_connect(G_OBJECT(button), "clicked",
+                     G_CALLBACK(viewer_region_dimension_on_zoom_out), dim);
+    gtk_toolbar_insert(GTK_TOOLBAR(toolbar), button, -1);
+}
+
 static GtkWidget *build_toolbar(viewer *v)
 {
     GtkWidget *toolbar;
-    GtkToolItem *button;
 
     toolbar = gtk_toolbar_new();
+    viewer_region::dimension *addr_dim = v->region.get_addr_dimension();
+    viewer_region::dimension *iseq_dim = v->region.get_iseq_dimension();
 
-    button = gtk_tool_button_new_from_stock(GTK_STOCK_ZOOM_IN);
-    g_signal_connect(G_OBJECT(button), "clicked",
-                     G_CALLBACK(on_zoom_in_addr), v);
-    gtk_toolbar_insert(GTK_TOOLBAR(toolbar), button, -1);
-    button = gtk_tool_button_new_from_stock(GTK_STOCK_ZOOM_OUT);
-    g_signal_connect(G_OBJECT(button), "clicked",
-                     G_CALLBACK(on_zoom_out_addr), v);
-    gtk_toolbar_insert(GTK_TOOLBAR(toolbar), button, -1);
-
+    build_toolbar_section(GTK_TOOLBAR(toolbar), addr_dim);
     gtk_toolbar_insert(GTK_TOOLBAR(toolbar), gtk_separator_tool_item_new(), -1);
-
-    button = gtk_tool_button_new_from_stock(GTK_STOCK_ZOOM_IN);
-    g_signal_connect(G_OBJECT(button), "clicked",
-                     G_CALLBACK(on_zoom_in_iseq), v);
-    gtk_toolbar_insert(GTK_TOOLBAR(toolbar), button, -1);
-    button = gtk_tool_button_new_from_stock(GTK_STOCK_ZOOM_OUT);
-    g_signal_connect(G_OBJECT(button), "clicked",
-                     G_CALLBACK(on_zoom_out_iseq), v);
-    gtk_toolbar_insert(GTK_TOOLBAR(toolbar), button, -1);
-
+    build_toolbar_section(GTK_TOOLBAR(toolbar), iseq_dim);
     return toolbar;
 }
 
@@ -510,7 +626,7 @@ static void build_main_window(viewer *v)
     g_signal_connect(G_OBJECT(v->window), "destroy",
                      G_CALLBACK(gtk_main_quit), NULL);
 
-    build_region(v, &v->region, 600, 600, v->addr_adj, v->iseq_adj);
+    v->region.init(v, 600, 600, v->addr_adj, v->iseq_adj);
     build_stack_trace_view(&v->access_stack);
     build_stack_trace_view(&v->block_stack);
 
@@ -528,7 +644,7 @@ static void build_main_window(viewer *v)
 
     /*** Main region ***/
     table = gtk_table_new(1, 1, FALSE);
-    gtk_table_attach_defaults(GTK_TABLE(table), v->region.top, 0, 1, 0, 1);
+    gtk_table_attach_defaults(GTK_TABLE(table), v->region.get_widget(), 0, 1, 0, 1);
 
     /*** Toolbar ***/
     toolbar = build_toolbar(v);
@@ -578,21 +694,21 @@ static bool range_to_pixels(double lo, double hi,
     return true;
 }
 
-static void update_region_vlines(viewer_region *vr)
+void viewer_region::update_lines()
 {
-    int rowstride = gdk_pixbuf_get_rowstride(vr->pixbuf);
-    guchar *pixels = gdk_pixbuf_get_pixels(vr->pixbuf);
-    int width = gdk_pixbuf_get_width(vr->pixbuf);
-    int height = gdk_pixbuf_get_height(vr->pixbuf);
-    int n_channels = gdk_pixbuf_get_n_channels(vr->pixbuf);
+    int rowstride = gdk_pixbuf_get_rowstride(pixbuf);
+    guchar *pixels = gdk_pixbuf_get_pixels(pixbuf);
+    int width = gdk_pixbuf_get_width(pixbuf);
+    int height = gdk_pixbuf_get_height(pixbuf);
+    int n_channels = gdk_pixbuf_get_n_channels(pixbuf);
 
     g_return_if_fail(n_channels == 3);
-    g_return_if_fail(gdk_pixbuf_get_colorspace(vr->pixbuf) == GDK_COLORSPACE_RGB);
-    g_return_if_fail(gdk_pixbuf_get_bits_per_sample(vr->pixbuf) == 8);
+    g_return_if_fail(gdk_pixbuf_get_colorspace(pixbuf) == GDK_COLORSPACE_RGB);
+    g_return_if_fail(gdk_pixbuf_get_bits_per_sample(pixbuf) == 8);
 
-    const double addr_min = viewer_region_min(vr, 0);
-    const double addr_max = viewer_region_max(vr, 0);
-    const double xrate = viewer_region_range(vr, 0) / width;
+    const double addr_min = dims[0].lower();
+    const double addr_max = dims[0].upper();
+    const double xrate = dims[0].range() / width;
     const page_map &pm = dg_view_page_map();
     const uint8_t color_cut[3] = {192, 192, 192};
     const uint8_t color_page[3] = {64, 64, 64};
@@ -638,26 +754,26 @@ static void update_region_vlines(viewer_region *vr)
     }
 }
 
-static void update_region(viewer_region *vr)
+void viewer_region::update()
 {
-    int rowstride = gdk_pixbuf_get_rowstride(vr->pixbuf);
-    guchar *pixels = gdk_pixbuf_get_pixels(vr->pixbuf);
-    int width = gdk_pixbuf_get_width(vr->pixbuf);
-    int height = gdk_pixbuf_get_height(vr->pixbuf);
-    int n_channels = gdk_pixbuf_get_n_channels(vr->pixbuf);
+    int rowstride = gdk_pixbuf_get_rowstride(pixbuf);
+    guchar *pixels = gdk_pixbuf_get_pixels(pixbuf);
+    int width = gdk_pixbuf_get_width(pixbuf);
+    int height = gdk_pixbuf_get_height(pixbuf);
+    int n_channels = gdk_pixbuf_get_n_channels(pixbuf);
 
     g_return_if_fail(n_channels == 3);
-    g_return_if_fail(gdk_pixbuf_get_colorspace(vr->pixbuf) == GDK_COLORSPACE_RGB);
-    g_return_if_fail(gdk_pixbuf_get_bits_per_sample(vr->pixbuf) == 8);
-    gdk_pixbuf_fill(vr->pixbuf, 0);
+    g_return_if_fail(gdk_pixbuf_get_colorspace(pixbuf) == GDK_COLORSPACE_RGB);
+    g_return_if_fail(gdk_pixbuf_get_bits_per_sample(pixbuf) == 8);
+    gdk_pixbuf_fill(pixbuf, 0);
 
-    update_region_vlines(vr);
+    update_lines();
 
     const bbrun_list &bbruns = dg_view_bbruns();
-    const double addr_min = viewer_region_min(vr, 0);
-    const double addr_max = viewer_region_max(vr, 0);
-    const double iseq_min = viewer_region_min(vr, 1);
-    const double iseq_max = viewer_region_max(vr, 1);
+    const double addr_min = dims[0].lower();
+    const double addr_max = dims[0].upper();
+    const double iseq_min = dims[1].lower();
+    const double iseq_max = dims[1].upper();
     for (bbrun_list::const_iterator bbr = bbruns.begin(); bbr != bbruns.end(); ++bbr)
     {
         for (size_t j = 0; j < bbr->n_addrs; j++)
@@ -698,86 +814,37 @@ static void update_region(viewer_region *vr)
             }
     }
 
-    gtk_widget_queue_draw(vr->image);
+    gtk_widget_queue_draw(image);
 
     for (int i = 0; i < 2; i++)
-    {
-        vr->dims[i].cached_min = gtk_adjustment_get_value(vr->dims[i].adj);
-        vr->dims[i].cached_max = vr->dims[i].cached_min + gtk_adjustment_get_page_size(vr->dims[i].adj);
-    }
+        dims[i].update_cache();
 }
 
-static void on_view_changed(GtkAdjustment *adj, gpointer user_data)
+void viewer_region::on_changed(GtkAdjustment *adj)
 {
-    viewer_region *vr = (viewer_region *) user_data;
-    bool dirty = false;
-
-    for (int i = 0; i < 2; i++)
-    {
-        double min = gtk_adjustment_get_value(vr->dims[i].adj);
-        double max = min + gtk_adjustment_get_page_size(vr->dims[i].adj);
-        if (vr->dims[i].cached_min != min || vr->dims[i].cached_max != max)
-            dirty = true;
-    }
-    if (dirty)
-        update_region(vr);
+    if (dims[0].cache_dirty() || dims[1].cache_dirty())
+        update();
 }
 
-static gboolean on_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data)
+static void viewer_region_on_changed(GtkAdjustment *adj, gpointer user_data)
 {
     viewer_region *vr = (viewer_region *) user_data;
+    vr->on_changed(adj);
+}
 
-    vr->in_click = true;
-    vr->click_x = event->x;
-    vr->click_y = event->y;
+void viewer_region::on_press(GtkWidget *widget, GdkEventButton *event)
+{
+    in_click = true;
+    click_x = event->x;
+    click_y = event->y;
     gtk_grab_add(widget);
-    return FALSE;
 }
 
-/* Computes new values for dimension, based on two coordinates of a zoom box in
- * a window space [0, size).
- *
- * If massage is true, the zoom area is expanded slightly then clamped. It
- * should be true when doing click-and-drag zooming, and false when zooming
- * in response to toolbar buttons.
- */
-static void update_zoom(dimension *dim, int w1, int w2, int size, bool massage)
+static gboolean viewer_region_on_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data)
 {
-    /* Convert to pixel centers */
-    double l = min(w1, w2) + 0.5;
-    double h = max(w1, w2) + 0.5;
-
-    /* Convert to parametric coordinates in [0, 1] */
-    l /= size;
-    h /= size;
-
-    if (massage)
-    {
-        double scale = h - l;
-        /* Expand slightly so that some context is visible */
-        double expand = 0.1f * scale;
-        l -= expand;
-        h += expand;
-
-        /* Clamp to the window */
-        l = max(l, 0.0);
-        h = min(h, 1.0);
-    }
-
-    /* Interpolate to get new coordinates */
-    double old_size = gtk_adjustment_get_page_size(dim->adj);
-    double value = gtk_adjustment_get_value(dim->adj) + l * old_size;
-    double end = value + old_size * (h - l);
-
-    /* Clamp to maximum range of adjustment */
-    value = max(value, gtk_adjustment_get_lower(dim->adj));
-    end = min(end, gtk_adjustment_get_upper(dim->adj));
-
-    double page_size = end - value;
-    gtk_adjustment_set_page_size(dim->adj, page_size);
-    gtk_adjustment_set_page_increment(dim->adj, page_size);
-    gtk_adjustment_set_step_increment(dim->adj, 0.1 * page_size);
-    gtk_adjustment_set_value(dim->adj, value);
+    viewer_region *vr = (viewer_region *) user_data;
+    vr->on_press(widget, event);
+    return FALSE;
 }
 
 static void stack_trace_view_populate(stack_trace_view *stv, const vector<HWord> &st)
@@ -801,33 +868,32 @@ static void stack_trace_view_populate(stack_trace_view *stv, const vector<HWord>
     }
 }
 
-static gboolean on_release(GtkWidget *widget, GdkEventButton *event, gpointer user_data)
+void viewer_region::on_release(GtkWidget *widget, GdkEventButton *event)
 {
     gtk_grab_remove(widget);
 
-    viewer_region *vr = (viewer_region *) user_data;
-    if (vr->in_click)
+    if (in_click)
     {
-        vr->in_click = false;
-        int width = gdk_pixbuf_get_width(vr->pixbuf);
-        int height = gdk_pixbuf_get_height(vr->pixbuf);
-        if (abs(event->x - vr->click_x) > 2 && abs(event->y - vr->click_y) > 2)
+        in_click = false;
+        int width = gdk_pixbuf_get_width(pixbuf);
+        int height = gdk_pixbuf_get_height(pixbuf);
+        if (abs(event->x - click_x) > 2 && abs(event->y - click_y) > 2)
         {
             /* Assume it was a drag to zoom */
-            g_object_freeze_notify(G_OBJECT(vr->dims[0].adj));
-            g_object_freeze_notify(G_OBJECT(vr->dims[1].adj));
-            update_zoom(&vr->dims[0], vr->click_x, event->x, width, true);
-            update_zoom(&vr->dims[1], vr->click_y, event->y, height, true);
-            g_object_thaw_notify(G_OBJECT(vr->dims[1].adj));
-            g_object_thaw_notify(G_OBJECT(vr->dims[0].adj));
+            dims[0].freeze();
+            dims[1].freeze();
+            dims[0].update(click_x, event->x, width, true);
+            dims[1].update(click_y, event->y, width, true);
+            dims[0].thaw();
+            dims[1].thaw();
         }
         else
         {
             /* A click to get information */
-            const double addr_min = viewer_region_min(vr, 0);
-            const double addr_size = viewer_region_range(vr, 0);
-            const double iseq_min = viewer_region_min(vr, 1);
-            const double iseq_size = viewer_region_range(vr, 1);
+            const double addr_min = dims[0].lower();
+            const double addr_size = dims[0].range();
+            const double iseq_min = dims[1].lower();
+            const double iseq_size = dims[1].range();
 
             double addr_scale = addr_size / width;
             double iseq_scale = iseq_size / height;
@@ -842,97 +908,78 @@ static gboolean on_release(GtkWidget *widget, GdkEventButton *event, gpointer us
             {
                 ostringstream addr_str;
                 addr_str << showbase << hex << access.addr;
-                gtk_entry_set_text(GTK_ENTRY(vr->owner->addr_entry), addr_str.str().c_str());
+                gtk_entry_set_text(GTK_ENTRY(owner->addr_entry), addr_str.str().c_str());
 
                 mem_block *block = access.block;
                 if (block != NULL)
                 {
                     addr_str.str("");
                     addr_str << block->addr;
-                    gtk_entry_set_text(GTK_ENTRY(vr->owner->block_addr_entry), addr_str.str().c_str());
+                    gtk_entry_set_text(GTK_ENTRY(owner->block_addr_entry), addr_str.str().c_str());
 
                     ostringstream size_str;
                     size_str << block->size;
-                    gtk_entry_set_text(GTK_ENTRY(vr->owner->block_size_entry), size_str.str().c_str());
+                    gtk_entry_set_text(GTK_ENTRY(owner->block_size_entry), size_str.str().c_str());
 
                     ostringstream offset_str;
                     offset_str << access.addr - block->addr;
-                    gtk_entry_set_text(GTK_ENTRY(vr->owner->block_offset_entry), offset_str.str().c_str());
+                    gtk_entry_set_text(GTK_ENTRY(owner->block_offset_entry), offset_str.str().c_str());
 
-                    stack_trace_view_populate(&vr->owner->block_stack, block->stack);
+                    stack_trace_view_populate(&owner->block_stack, block->stack);
                 }
                 else
                 {
                     /* Clear it */
-                    gtk_entry_set_text(GTK_ENTRY(vr->owner->block_addr_entry), "");
-                    gtk_entry_set_text(GTK_ENTRY(vr->owner->block_size_entry), "");
-                    gtk_entry_set_text(GTK_ENTRY(vr->owner->block_offset_entry), "");
-                    stack_trace_view_populate(&vr->owner->block_stack, vector<HWord>());
+                    gtk_entry_set_text(GTK_ENTRY(owner->block_addr_entry), "");
+                    gtk_entry_set_text(GTK_ENTRY(owner->block_size_entry), "");
+                    gtk_entry_set_text(GTK_ENTRY(owner->block_offset_entry), "");
+                    stack_trace_view_populate(&owner->block_stack, vector<HWord>());
                 }
 
-                stack_trace_view_populate(&vr->owner->access_stack, access.stack);
+                stack_trace_view_populate(&owner->access_stack, access.stack);
             }
         }
     }
+}
+
+static gboolean viewer_region_on_release(GtkWidget *widget, GdkEventButton *event, gpointer user_data)
+{
+    viewer_region *vr = (viewer_region *) user_data;
+    vr->on_release(widget, event);
     return FALSE;
 }
 
-static gboolean on_resize(GtkWidget *widget, GtkAllocation *event, gpointer user_data)
+void viewer_region::on_resize(GtkWidget *widget, GtkAllocation *event)
 {
-    viewer_region *vr = (viewer_region *) user_data;
-
-    if (event->width != gdk_pixbuf_get_width(vr->pixbuf)
-        || event->height != gdk_pixbuf_get_height(vr->pixbuf))
+    if (event->width != gdk_pixbuf_get_width(pixbuf)
+        || event->height != gdk_pixbuf_get_height(pixbuf))
     {
         GdkPixbuf *new_pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8,
                                                event->width, event->height);
-        g_return_val_if_fail(new_pixbuf != NULL, FALSE);
-        gtk_image_set_from_pixbuf(GTK_IMAGE(vr->image), new_pixbuf);
-        vr->pixbuf = new_pixbuf;
+        gtk_image_set_from_pixbuf(GTK_IMAGE(image), new_pixbuf);
+        pixbuf = new_pixbuf;
         g_object_unref(new_pixbuf); /* The GtkImage holds a ref for us */
-        update_region(vr);
+        update();
     }
+}
+
+static gboolean viewer_region_on_resize(GtkWidget *widget, GtkAllocation *event, gpointer user_data)
+{
+    viewer_region *vr = (viewer_region *) user_data;
+    vr->on_resize(widget, event);
     return FALSE;
 }
 
-static void on_zoom_out_addr(GtkToolButton *button, gpointer user_data)
+static void viewer_region_dimension_on_zoom_out(GtkAction *action, gpointer user_data)
 {
-    viewer *v = (viewer *) user_data;
-    viewer_region *vr = &v->region;
-
-    g_object_freeze_notify(G_OBJECT(vr->dims[0].adj));
-    update_zoom(&vr->dims[0], -1, 3, 2, false);
-    g_object_thaw_notify(G_OBJECT(vr->dims[0].adj));
+    viewer_region::dimension *d = (viewer_region::dimension *) user_data;
+    d->update(-1, 3, 2, false);
 }
 
-static void on_zoom_in_addr(GtkToolButton *button, gpointer user_data)
+static void viewer_region_dimension_on_zoom_in(GtkAction *action, gpointer user_data)
 {
-    viewer *v = (viewer *) user_data;
-    viewer_region *vr = &v->region;
-
-    g_object_freeze_notify(G_OBJECT(vr->dims[0].adj));
-    update_zoom(&vr->dims[0], 1, 3, 4, false);
-    g_object_thaw_notify(G_OBJECT(vr->dims[0].adj));
-}
-
-static void on_zoom_out_iseq(GtkToolButton *button, gpointer user_data)
-{
-    viewer *v = (viewer *) user_data;
-    viewer_region *vr = &v->region;
-
-    g_object_freeze_notify(G_OBJECT(vr->dims[1].adj));
-    update_zoom(&vr->dims[1], -1, 3, 2, false);
-    g_object_thaw_notify(G_OBJECT(vr->dims[1].adj));
-}
-
-static void on_zoom_in_iseq(GtkToolButton *button, gpointer user_data)
-{
-    viewer *v = (viewer *) user_data;
-    viewer_region *vr = &v->region;
-
-    g_object_freeze_notify(G_OBJECT(vr->dims[1].adj));
-    update_zoom(&vr->dims[1], 1, 3, 4, false);
-    g_object_thaw_notify(G_OBJECT(vr->dims[1].adj));
+    viewer_region::dimension *d = (viewer_region::dimension *) user_data;
+    d->update(1, 3, 4, false);
 }
 
 int main(int argc, char **argv)
@@ -949,7 +996,7 @@ int main(int argc, char **argv)
         return 1;
 
     build_main_window(&main_viewer);
-    update_region(&main_viewer.region);
+    main_viewer.region.update();
     gtk_main();
     return 0;
 }
