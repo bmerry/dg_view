@@ -37,12 +37,14 @@
 
 using namespace std;
 
+/* A single tree view showing a stack trace. */
 struct stack_trace_view
 {
     GtkWidget *view;        /* GtkTreeView */
     GtkListStore *store;
 };
 
+/* Column numbers in the model backing a stack_trace_view */
 enum stack_trace_column
 {
     STC_ADDR = 0,
@@ -54,14 +56,28 @@ enum stack_trace_column
 
 struct viewer;
 
+/* A single viewport onto the space-time. Currently there is only one, but
+ * the design allows for more.
+ */
 class viewer_region
 {
 public:
+    /* Captures the viewable range of one axis. Coordinates are in the
+     * abstract space (e.g. instruction count or remapped address).
+     */
     class dimension
     {
     private:
+        /* The cached values indicate what the parent's GtkImage currently
+         * hold. They are updated when the image is updated, and compared
+         * to the adjustment.
+         */
         double cached_lower;
         double cached_upper;
+
+        /* Adjustment for the scroll bar controlling this view region.
+         * This pointer holds a GObject ref.
+         */
         GtkAdjustment *adj;
 
         // Prevent copying, since it will mess up the refcounting
@@ -93,6 +109,11 @@ public:
             return adj;
         }
 
+        /* Invalidates the cache and sets the adjustment. Should be called
+         * immediately after construction (it is not a constructor because
+         * that would interfere with embedding it inside the parent, as C++98
+         * doesn't allow array members to be initialized.
+         */
         void init(viewer_region *owner, GtkAdjustment *adj);
 
         bool cache_dirty() const
@@ -133,6 +154,9 @@ private:
     GtkWidget *top;     /* Top-level widget to add to parents */
     GdkPixbuf *pixbuf;
 
+    /* These are set when the click depresses the mouse, and used during
+     * mouse release to distinguish a drag (for zoom) vs click (for info).
+     */
     int click_x;
     int click_y;
     bool in_click;
@@ -143,6 +167,9 @@ private:
     viewer_region &operator=(const viewer_region &);
     viewer_region(const viewer_region &);
 
+    /* Draws the vertical grid lines showing cache line and page line
+     * boundaries. Should only be called from update().
+     */
     void update_lines();
 
 public:
@@ -151,6 +178,9 @@ public:
     dimension *get_addr_dimension() { return &dims[0]; }
     dimension *get_iseq_dimension() { return &dims[1]; }
 
+    /* Unconditionally regenerates the backing pixmap. It does not check
+     * check whether an update is necessary, and it does not handle resizes.
+     */
     void update();
 
     void on_changed(GtkAdjustment *adj);
@@ -167,11 +197,16 @@ public:
               GtkAdjustment *addr_adj, GtkAdjustment *iseq_adj);
 };
 
+/* Container for the main window and all its state */
 struct viewer
 {
     GtkWidget *window;             /* GtkWindow */
     viewer_region region;
 
+    /* The adjustments for the zoomable regions. These do NOT hold references,
+     * as there are sufficient references in the viewer_region and the widget
+     * tree to prevent them from vanishing.
+     */
     GtkAdjustment *addr_adj;
     GtkAdjustment *iseq_adj;
 
@@ -183,6 +218,8 @@ struct viewer
     stack_trace_view access_stack; /* Stack trace where the access occurred */
     stack_trace_view block_stack;  /* Stack trace where the memory was allocated */
 };
+
+/* Wrappers around the on_* methods for passing as callback functions. */
 
 static gboolean viewer_region_on_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data);
 static gboolean viewer_region_on_release(GtkWidget *widget, GdkEventButton *event, gpointer user_data);
@@ -710,15 +747,16 @@ void viewer_region::update_lines()
     const double addr_max = dims[0].upper();
     const double xrate = dims[0].range() / width;
     const page_map &pm = dg_view_page_map();
-    const uint8_t color_cut[3] = {192, 192, 192};
-    const uint8_t color_page[3] = {64, 64, 64};
-    const uint8_t color_cache[3] = {96, 32, 32};
+    const uint8_t color_cut[3] = {192, 192, 192}; // light gray
+    const uint8_t color_page[3] = {64, 64, 64};   // dark gray
+    const uint8_t color_cache[3] = {96, 32, 32};  // reddish
     int x;
     HWord last = 0;
     for (page_map::const_iterator i = pm.begin(); i != pm.end(); ++i)
     {
         if (i->first != last + DG_VIEW_PAGE_SIZE)
         {
+            // Address map discontinuity
             if (location_to_pixel(i->second, addr_min, addr_max, width, x))
             {
                 unsigned int ofs = n_channels * x;
@@ -822,6 +860,9 @@ void viewer_region::update()
 
 void viewer_region::on_changed(GtkAdjustment *adj)
 {
+    /* Note that zooming can cause multiple signals to be emitted, but we
+     * only need to redraw once. Hence the cache.
+     */
     if (dims[0].cache_dirty() || dims[1].cache_dirty())
         update();
 }
@@ -954,6 +995,9 @@ void viewer_region::on_resize(GtkWidget *widget, GtkAllocation *event)
     if (event->width != gdk_pixbuf_get_width(pixbuf)
         || event->height != gdk_pixbuf_get_height(pixbuf))
     {
+        /* Pixbuf cannot be resized in place, so allocate a new one and
+         * deref the old.
+         */
         GdkPixbuf *new_pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8,
                                                event->width, event->height);
         gtk_image_set_from_pixbuf(GTK_IMAGE(image), new_pixbuf);
@@ -973,13 +1017,13 @@ static gboolean viewer_region_on_resize(GtkWidget *widget, GtkAllocation *event,
 static void viewer_region_dimension_on_zoom_out(GtkAction *action, gpointer user_data)
 {
     viewer_region::dimension *d = (viewer_region::dimension *) user_data;
-    d->update(-1, 3, 2, false);
+    d->update(-1, 3, 2, false); // Doubles viewport
 }
 
 static void viewer_region_dimension_on_zoom_in(GtkAction *action, gpointer user_data)
 {
     viewer_region::dimension *d = (viewer_region::dimension *) user_data;
-    d->update(1, 3, 4, false);
+    d->update(1, 3, 4, false);  // Halves viewport
 }
 
 int main(int argc, char **argv)
