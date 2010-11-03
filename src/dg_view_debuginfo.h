@@ -40,7 +40,7 @@ void dg_view_addr2info(HWord addr, std::string &function, std::string &file, int
 std::string dg_view_addr2line(HWord addr);
 
 /* Takes a full path and returns a short form of it for display by stripping
- * paths
+ * paths.
  */
 std::string dg_view_abbrev_file(const std::string &full);
 
