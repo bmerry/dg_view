@@ -48,60 +48,9 @@
 
 using namespace std;
 
-struct compare_bbrun_iseq
-{
-    bool operator()(const bbrun &a, const bbrun &b) const
-    {
-        return a.iseq_start < b.iseq_start;
-    }
-
-    bool operator()(const bbrun &a, uint64_t iseq) const
-    {
-        return a.iseq_start < iseq;
-    }
-
-    bool operator()(uint64_t iseq, const bbrun &a) const
-    {
-        return iseq < a.iseq_start;
-    }
-};
-
-/* Set of conditions to match stack traces against based on command-line options */
-struct condition_set
-{
-    uint32_t flags;         /* set-specific flags, not generically used */
-    set<string> user;
-    set<string> functions;
-    set<string> files;
-    set<string> dsos;
-    mutable map<HWord, bool> cache; /* cache for condition_set_match */
-};
-
 #define CONDITION_SET_FLAG_ANY           1U
 #define CONDITION_SET_FLAG_MALLOC        2U /* Any malloc-like function */
 #define CONDITION_SET_FLAG_RANGE         4U /* Any TRACK_RANGE request */
-
-static pool_allocator<HWord> hword_pool;
-static pool_allocator<mem_block *> mem_block_ptr_pool;
-
-/* All START_EVENTs with no matching END_EVENT from chosen_events */
-static multiset<string> active_events;
-/* All TRACK_RANGEs with no matching UNTRACK_RANGE from chosen_ranges */
-static multiset<pair<HWord, HWord> > active_ranges;
-
-static rangemap<HWord, mem_block *> block_map;
-static vector<mem_block *> block_storage;
-
-/* Events selected on the command line */
-static condition_set event_conditions;
-/* Ranges selected on the command line */
-static condition_set block_conditions;
-
-static vector<bbdef> bbdefs;
-static vector<bbrun> bbruns;
-static vector<context> contexts;
-static page_map fwd_page_map;
-static map<size_t, HWord> rev_page_map;
 
 template<typename T> T page_round_down(T x)
 {
@@ -114,7 +63,8 @@ template<typename T> T page_round_down(T x)
  * Returns the best score and best index for the block. If there were no
  * usable addresses, returns score of HUGE_VAL;
  */
-static pair<double, size_t> nearest_access_bbrun(const bbrun &bbr, double addr, double iseq, double ratio)
+template<typename WordType>
+pair<double, size_t> dg_view<WordType>::nearest_access_bbrun(const bbrun &bbr, double addr, double iseq, double ratio) const
 {
     double best_score = HUGE_VAL;
     size_t best_i = 0;
@@ -136,7 +86,8 @@ static pair<double, size_t> nearest_access_bbrun(const bbrun &bbr, double addr, 
     return make_pair(best_score, best_i);
 }
 
-mem_access dg_view_nearest_access(double addr, double iseq, double ratio)
+template<typename WordType>
+mem_access dg_view<WordType>::dg_view_nearest_access(double addr, double iseq, double ratio) const
 {
     /* Start at the right instruction and search outwards until we can bound
      * the search.
@@ -207,12 +158,14 @@ mem_access dg_view_nearest_access(double addr, double iseq, double ratio)
     return ans;
 }
 
-const bbrun_list &dg_view_bbruns()
+template<typename WordType>
+const dg_view<WordType>::bbrun_list & dg_view<WordType>::get_bbruns() const
 {
     return bbruns;
 }
 
-const bbdef &dg_view_bbrun_get_bbdef(const bbrun &bbr)
+template<typename WordType>
+const dg_view<WordType>::bbdef &dg_view<WordType>::bbrun_get_bbdef(const bbrun &bbr) const
 {
     assert(bbr.context_index < contexts.size());
     const context &ctx = contexts[bbr.context_index];
@@ -220,10 +173,11 @@ const bbdef &dg_view_bbrun_get_bbdef(const bbrun &bbr)
     return bbdefs[ctx.bbdef_index];
 }
 
-static mem_block *find_block(HWord addr)
+template<typename WordType>
+dg_view<WordType>::mem_block *dg_view<WordType>::find_block(word_type addr) const
 {
     mem_block *block = NULL;
-    rangemap<HWord, mem_block *>::iterator block_it = block_map.find(addr);
+    rangemap<HWord, mem_block *>::const_iterator block_it = block_map.find(addr);
     if (block_it != block_map.end())
         block = block_it->second;
     return block;
@@ -232,13 +186,14 @@ static mem_block *find_block(HWord addr)
 /* Checks whether a condition specified by a condition_set is met. It does not
  * include user events or the flags.
  */
-static bool condition_set_match(const condition_set &cs, const vector<HWord> &stack)
+template<typename WordType>
+bool dg_view<WordType>::condition_set_match(const condition_set &cs, const vector<word_type> &stack) const
 {
     if (cs.functions.empty() && cs.files.empty() && cs.dsos.empty())
         return false;
     for (size_t i = 0; i < stack.size(); i++)
     {
-        map<HWord, bool>::iterator pos = cs.cache.lower_bound(stack[i]);
+        map<word_type, bool>::iterator pos = cs.cache.lower_bound(stack[i]);
         if (pos != cs.cache.end() && pos->first == stack[i])
         {
             if (pos->second)
@@ -266,14 +221,15 @@ static bool condition_set_match(const condition_set &cs, const vector<HWord> &st
 }
 
 /* Whether a memory access matches the range conditions */
-static bool keep_access_block(HWord addr, uint8_t size, mem_block *block)
+template<typename WordType>
+bool dg_view<WordType>::keep_access_block(word_type addr, uint8_t size, mem_block *block) const
 {
     if (block_conditions.flags & CONDITION_SET_FLAG_ANY)
         return true;
     if (block != NULL && block->matched)
         return true;
 
-    for (multiset<pair<HWord, HWord> >::const_iterator i = active_ranges.begin(); i != active_ranges.end(); ++i)
+    for (multiset<pair<word_type, word_type> >::const_iterator i = active_ranges.begin(); i != active_ranges.end(); ++i)
         if (addr + size > i->first && addr < i->first + i->second)
             return true;
 
@@ -281,7 +237,8 @@ static bool keep_access_block(HWord addr, uint8_t size, mem_block *block)
 }
 
 /* Whether a memory access matches the event conditions */
-static bool keep_access_event(const vector<HWord> &stack)
+template<typename WordType>
+bool dg_view<WordType>::keep_access_event(const vector<word_type> &stack) const
 {
     if (event_conditions.flags & CONDITION_SET_FLAG_ANY)
         return true;
@@ -291,24 +248,31 @@ static bool keep_access_event(const vector<HWord> &stack)
     return condition_set_match(event_conditions, stack);
 }
 
-static bool keep_access(HWord addr, uint8_t size, const vector<HWord> &stack, mem_block *block)
+template<typename WordType>
+bool dg_view<WordType>::keep_access(word_type addr, uint8_t size, const vector<word_type> &stack, mem_block *block) const
 {
     return keep_access_block(addr, size, block) && keep_access_event(stack);
 }
 
-bool dg_view_load(const char *filename)
+template<typename WordType>
+void dg_view<WordType>::get_ranges(address_type &addr_min, address_type &addr_max, iseq_type &iseq_min, iseq_type &iseq_max) const
 {
-    bool first = true;
+    addr_min = fwd_page_map.begin()->second;
+    addr_max = (--fwd_page_map.end())->second + DG_VIEW_PAGE_SIZE;
+    iseq_min = bbruns.begin()->iseq_start;
+
+    bbrun_list::const_iterator last_bbrun = --bbruns.end();
+    const bbdef &last_bbdef = bbrun_get_bbdef(*last_bbrun);
+    iseq_max = last_bbrun->iseq_start + last_bbdef.accesses.back().iseq + 1;
+}
+
+template<typename WordType>
+dg_view_base *dg_view<WordType>::load_internal(FILE *f, const char *filename, int version, int endian)
+{
     uint64_t iseq = 0;
     uint64_t dseq = 0;
     record_parser *rp_ptr;
 
-    FILE *f = fopen(filename, "r");
-    if (!f)
-    {
-        fprintf(stderr, "Could not open `%s'.\n", filename);
-        return false;
-    }
     while (NULL != (rp_ptr = record_parser::create(f)))
     {
         auto_ptr<record_parser> rp(rp_ptr);
@@ -316,248 +280,213 @@ bool dg_view_load(const char *filename)
 
         try
         {
-            if (first)
+            switch (type)
             {
-                uint8_t version, endian, wordsize;
+            case DG_R_HEADER:
+                throw record_parser_content_error("Error: found header after first record.\n");
 
-                if (type != DG_R_HEADER)
-                    throw record_parser_error("Error: did not find header");
-                if (rp->extract_string() != "DATAGRIND1")
-                    throw record_parser_error("Error: did not find signature");
-                version = rp->extract_byte();
-                endian = rp->extract_byte();
-                wordsize = rp->extract_byte();
-                int expected_version = 1;
-                if (version != expected_version)
+            case DG_R_BBDEF:
                 {
-                    fprintf(stderr, "Warning: version mismatch (expected %d, got %u).\n",
-                            expected_version, version);
+                    bbdef bbd;
+                    uint8_t n_instrs = rp->extract_byte();
+                    HWord n_accesses = rp->extract_word<word_type>();
+
+                    if (n_instrs == 0)
+                    {
+                        throw record_parser_content_error("Error: empty BB");
+                    }
+                    bbd.instr_addrs.resize(n_instrs);
+                    bbd.accesses.resize(n_accesses);
+
+                    for (word_type i = 0; i < n_instrs; i++)
+                    {
+                        bbd.instr_addrs[i] = rp->extract_word<word_type>();
+                        // discard size
+                        (void) rp->extract_byte();
+                    }
+                    for (word_type i = 0; i < n_accesses; i++)
+                    {
+                        bbd.accesses[i].dir = rp->extract_byte();
+                        bbd.accesses[i].size = rp->extract_byte();
+                        bbd.accesses[i].iseq = rp->extract_byte();
+                        if (bbd.accesses[i].iseq >= n_instrs)
+                        {
+                            throw record_parser_content_error("iseq is greater than instruction count");
+                        }
+                    }
+                    bbdefs.push_back(bbd);
                 }
-                /* TODO: do something useful with endianness */
-                if (wordsize != sizeof(HWord))
+                break;
+            case DG_R_CONTEXT:
                 {
-                    ostringstream msg;
-                    msg << "Error: pointer size mismatch (expected " << sizeof(HWord) << ", got " << wordsize << ")";
-                    throw record_parser_content_error(msg.str());
-                }
+                    context ctx;
+                    ctx.bbdef_index = rp->extract_word<word_type>();
 
-                first = false;
-            }
-            else
-            {
-                switch (type)
-                {
-                case DG_R_HEADER:
-                    throw record_parser_content_error("Error: found header after first record.\n");
+                    uint8_t n_stack = rp->extract_byte();
+                    if (n_stack == 0)
+                        throw record_parser_content_error("Error: empty call stack");
+                    ctx.stack.resize(n_stack);
+                    for (uint8_t i = 0; i < n_stack; i++)
+                        ctx.stack[i] = rp->extract_word<word_type>();
 
-                case DG_R_BBDEF:
-                    {
-                        bbdef bbd;
-                        uint8_t n_instrs = rp->extract_byte();
-                        HWord n_accesses = rp->extract_word();
-
-                        if (n_instrs == 0)
-                        {
-                            throw record_parser_content_error("Error: empty BB");
-                        }
-                        bbd.instr_addrs.resize(n_instrs);
-                        bbd.accesses.resize(n_accesses);
-
-                        for (HWord i = 0; i < n_instrs; i++)
-                        {
-                            bbd.instr_addrs[i] = rp->extract_word();
-                            // discard size
-                            (void) rp->extract_byte();
-                        }
-                        for (HWord i = 0; i < n_accesses; i++)
-                        {
-                            bbd.accesses[i].dir = rp->extract_byte();
-                            bbd.accesses[i].size = rp->extract_byte();
-                            bbd.accesses[i].iseq = rp->extract_byte();
-                            if (bbd.accesses[i].iseq >= n_instrs)
-                            {
-                                throw record_parser_content_error("iseq is greater than instruction count");
-                            }
-                        }
-                        bbdefs.push_back(bbd);
-                    }
-                    break;
-                case DG_R_CONTEXT:
-                    {
-                        context ctx;
-                        ctx.bbdef_index = rp->extract_word();
-
-                        uint8_t n_stack = rp->extract_byte();
-                        if (n_stack == 0)
-                            throw record_parser_content_error("Error: empty call stack");
-                        ctx.stack.resize(n_stack);
-                        for (uint8_t i = 0; i < n_stack; i++)
-                            ctx.stack[i] = rp->extract_word();
-
-                        if (ctx.bbdef_index >= bbdefs.size())
-                        {
-                            ostringstream msg;
-                            msg << "Error: bbdef index " << ctx.bbdef_index << " is out of range";
-                            throw record_parser_content_error(msg.str());
-                        }
-                        contexts.push_back(ctx);
-                    }
-                    break;
-                case DG_R_BBRUN:
-                    {
-                        bbrun bbr;
-                        bool keep_any = false;
-
-                        bbr.iseq_start = iseq;
-                        bbr.dseq_start = dseq;
-                        bbr.context_index = rp->extract_word();
-                        if (bbr.context_index >= contexts.size())
-                        {
-                            ostringstream msg;
-                            msg << "Error: context index " << bbr.context_index << " is out of range";
-                            throw record_parser_content_error(msg.str());
-                        }
-
-                        const context &ctx = contexts[bbr.context_index];
-                        const bbdef &bbd = bbdefs[ctx.bbdef_index];
-                        uint8_t n_instrs = rp->extract_byte();
-                        uint64_t n_addrs = rp->remain() / sizeof(HWord);
-                        if (n_addrs > bbd.accesses.size())
-                            throw record_parser_content_error("Error: too many access addresses");
-
-                        bbr.n_addrs = n_addrs;
-                        bbr.addrs = hword_pool.alloc(n_addrs);
-                        bbr.blocks = mem_block_ptr_pool.alloc(n_addrs);
-                        vector<HWord> stack = ctx.stack;
-                        for (HWord i = 0; i < n_addrs; i++)
-                        {
-                            HWord addr = rp->extract_word();
-                            const bbdef_access &access = bbd.accesses[i];
-
-                            mem_block *block = find_block(addr);
-                            stack[0] = bbd.instr_addrs[access.iseq];
-                            bool keep = keep_access(addr, access.size, stack, block);
-                            if (keep)
-                            {
-                                keep_any = true;
-                                fwd_page_map[page_round_down(addr)] = 0;
-                                bbr.addrs[i] = addr;
-                                bbr.blocks[i] = block;
-                            }
-                            else
-                            {
-                                bbr.addrs[i] = 0;
-                                bbr.blocks[i] = NULL;
-                            }
-                        }
-
-                        if (keep_any)
-                            bbruns.push_back(bbr);
-                        iseq += n_instrs;
-                        dseq += n_addrs;
-                    }
-                    break;
-                case DG_R_TRACK_RANGE:
-                    {
-                        HWord addr = rp->extract_word();
-                        HWord size = rp->extract_word();
-
-                        string var_type = rp->extract_string();
-                        string label = rp->extract_string();
-
-                        if (block_conditions.user.count(label)
-                            || (block_conditions.flags & CONDITION_SET_FLAG_RANGE))
-                            active_ranges.insert(make_pair(addr, size));
-                    }
-                    break;
-                case DG_R_UNTRACK_RANGE:
-                    {
-                        HWord addr = rp->extract_word();
-                        HWord size = rp->extract_word();
-
-                        pair<HWord, HWord> key(addr, size);
-                        multiset<pair<HWord, HWord> >::iterator it = active_ranges.find(key);
-                        if (it != active_ranges.end())
-                            active_ranges.erase(it);
-                    }
-                    break;
-                case DG_R_MALLOC_BLOCK:
-                    {
-                        HWord addr = rp->extract_word();
-                        HWord size = rp->extract_word();
-                        HWord n_ips = rp->extract_word();
-                        vector<HWord> ips;
-
-                        mem_block *block = new mem_block;
-                        block->addr = addr;
-                        block->size = size;
-                        block->stack.reserve(n_ips);
-                        for (HWord i = 0; i < n_ips; i++)
-                        {
-                            HWord stack_addr = rp->extract_word();
-                            block->stack.push_back(stack_addr);
-                        }
-                        block->matched = false;
-                        if (block_conditions.flags & (CONDITION_SET_FLAG_ANY | CONDITION_SET_FLAG_MALLOC)
-                            || condition_set_match(block_conditions, block->stack))
-                            block->matched = true;
-                        block_storage.push_back(block);
-                        block_map.insert(addr, addr + size, block);
-                    }
-                    break;
-                case DG_R_FREE_BLOCK:
-                    {
-                        HWord addr = rp->extract_word();
-                        block_map.erase(addr);
-                    }
-                    break;
-                case DG_R_START_EVENT:
-                case DG_R_END_EVENT:
-                    {
-                        string label = rp->extract_string();
-                        if (event_conditions.user.count(label))
-                        {
-                            if (type == DG_R_START_EVENT)
-                                active_events.insert(label);
-                            else
-                            {
-                                multiset<string>::iterator it = active_events.find(label);
-                                if (it != active_events.end())
-                                    active_events.erase(it);
-                            }
-                        }
-                    }
-                    break;
-                case DG_R_TEXT_AVMA:
-                    {
-                        HWord avma = rp->extract_word();
-                        string filename = rp->extract_string();
-                        dg_view_load_object_file(filename.c_str(), avma);
-                    }
-                    break;
-                default:
+                    if (ctx.bbdef_index >= bbdefs.size())
                     {
                         ostringstream msg;
-                        msg << showbase << hex;
-                        msg << "Error: unknown record type " << (unsigned int) type;
+                        msg << "Error: bbdef index " << ctx.bbdef_index << " is out of range";
                         throw record_parser_content_error(msg.str());
                     }
+                    contexts.push_back(ctx);
                 }
+                break;
+            case DG_R_BBRUN:
+                {
+                    bbrun bbr;
+                    bool keep_any = false;
+
+                    bbr.iseq_start = iseq;
+                    bbr.dseq_start = dseq;
+                    bbr.context_index = rp->extract_word<word_type>();
+                    if (bbr.context_index >= contexts.size())
+                    {
+                        ostringstream msg;
+                        msg << "Error: context index " << bbr.context_index << " is out of range";
+                        throw record_parser_content_error(msg.str());
+                    }
+
+                    const context &ctx = contexts[bbr.context_index];
+                    const bbdef &bbd = bbdefs[ctx.bbdef_index];
+                    uint8_t n_instrs = rp->extract_byte();
+                    uint64_t n_addrs = rp->remain() / sizeof(word_type);
+                    if (n_addrs > bbd.accesses.size())
+                        throw record_parser_content_error("Error: too many access addresses");
+
+                    bbr.n_addrs = n_addrs;
+                    bbr.addrs = hword_pool.alloc(n_addrs);
+                    bbr.blocks = mem_block_ptr_pool.alloc(n_addrs);
+                    vector<word_type> stack = ctx.stack;
+                    for (word_type i = 0; i < n_addrs; i++)
+                    {
+                        word_type addr = rp->extract_word<word_type>();
+                        const bbdef_access &access = bbd.accesses[i];
+
+                        mem_block *block = find_block(addr);
+                        stack[0] = bbd.instr_addrs[access.iseq];
+                        bool keep = keep_access(addr, access.size, stack, block);
+                        if (keep)
+                        {
+                            keep_any = true;
+                            fwd_page_map[page_round_down(addr)] = 0;
+                            bbr.addrs[i] = addr;
+                            bbr.blocks[i] = block;
+                        }
+                        else
+                        {
+                            bbr.addrs[i] = 0;
+                            bbr.blocks[i] = NULL;
+                        }
+                    }
+
+                    if (keep_any)
+                        bbruns.push_back(bbr);
+                    iseq += n_instrs;
+                    dseq += n_addrs;
+                }
+                break;
+            case DG_R_TRACK_RANGE:
+                {
+                    word_type addr = rp->extract_word<word_type>();
+                    word_type size = rp->extract_word<word_type>();
+
+                    string var_type = rp->extract_string();
+                    string label = rp->extract_string();
+
+                    if (block_conditions.user.count(label)
+                        || (block_conditions.flags & CONDITION_SET_FLAG_RANGE))
+                        active_ranges.insert(make_pair(addr, size));
+                }
+                break;
+            case DG_R_UNTRACK_RANGE:
+                {
+                    word_type addr = rp->extract_word<word_type>();
+                    word_type size = rp->extract_word<word_type>();
+
+                    pair<word_type, word_type> key(addr, size);
+                    multiset<pair<word_type, word_type> >::iterator it = active_ranges.find(key);
+                    if (it != active_ranges.end())
+                        active_ranges.erase(it);
+                }
+                break;
+            case DG_R_MALLOC_BLOCK:
+                {
+                    word_type addr = rp->extract_word<word_type>();
+                    word_type size = rp->extract_word<word_type>();
+                    word_type n_ips = rp->extract_word<word_type>();
+                    vector<word_type> ips;
+
+                    mem_block *block = new mem_block;
+                    block->addr = addr;
+                    block->size = size;
+                    block->stack.reserve(n_ips);
+                    for (word_type i = 0; i < n_ips; i++)
+                    {
+                        word_type stack_addr = rp->extract_word<word_type>();
+                        block->stack.push_back(stack_addr);
+                    }
+                    block->matched = false;
+                    if (block_conditions.flags & (CONDITION_SET_FLAG_ANY | CONDITION_SET_FLAG_MALLOC)
+                        || condition_set_match(block_conditions, block->stack))
+                        block->matched = true;
+                    block_storage.push_back(block);
+                    block_map.insert(addr, addr + size, block);
+                }
+                break;
+            case DG_R_FREE_BLOCK:
+                {
+                    word_type addr = rp->extract_word<word_type>();
+                    block_map.erase(addr);
+                }
+                break;
+            case DG_R_START_EVENT:
+            case DG_R_END_EVENT:
+                {
+                    string label = rp->extract_string();
+                    if (event_conditions.user.count(label))
+                    {
+                        if (type == DG_R_START_EVENT)
+                            active_events.insert(label);
+                        else
+                        {
+                            multiset<string>::iterator it = active_events.find(label);
+                            if (it != active_events.end())
+                                active_events.erase(it);
+                        }
+                    }
+                }
+                break;
+            case DG_R_TEXT_AVMA:
+                {
+                    word_type avma = rp->extract_word<word_type>();
+                    string filename = rp->extract_string();
+                    dg_view_load_object_file(filename.c_str(), avma);
+                }
+                break;
+            default:
+                {
+                    ostringstream msg;
+                    msg << showbase << hex;
+                    msg << "Error: unknown record type " << (unsigned int) type;
+                    throw record_parser_content_error(msg.str());
+                }
+            }
             }
             rp->finish();
         }
         catch (record_parser_content_error &e)
         {
-            fprintf(stderr, "%s\n", e.what());
+            fprintf(stderr, "%s: %s\n", filename, e.what());
             rp->discard();
         }
-        catch (record_parser_error &e)
-        {
-            fprintf(stderr, "%s\n", e.what());
-            return false;
-        }
     }
-    fclose(f);
 
     /* bbruns is easily the largest structure, and due to the way vectors
      * work, could be overcommitted. Shrink back to just fit. */
@@ -565,7 +494,7 @@ bool dg_view_load(const char *filename)
     bbruns.swap(tmp);
 
     size_t remapped_base = 0;
-    for (map<HWord, size_t>::iterator i = fwd_page_map.begin(); i != fwd_page_map.end(); i++)
+    for (map<word_type, size_t>::iterator i = fwd_page_map.begin(); i != fwd_page_map.end(); i++)
     {
         i->second = remapped_base;
         remapped_base += DG_VIEW_PAGE_SIZE;
@@ -574,8 +503,7 @@ bool dg_view_load(const char *filename)
 
     if (bbruns.empty())
     {
-        fprintf(stderr, "No accesses match the criteria.\n");
-        return false;
+        throw record_parser_error("No accesses match the criteria.");
     }
 
 #if 1
@@ -590,7 +518,88 @@ bool dg_view_load(const char *filename)
            bbruns.back().iseq_start,
            bbruns.back().dseq_start + bbruns.back().n_addrs);
 #endif
-    return true;
+}
+
+dg_view_base *dg_view_load(const char *filename)
+{
+    record_parser *rp_ptr;
+    auto_ptr<dg_view_base> accesses;
+    FILE *f = fopen(filename, "r");
+    if (!f)
+    {
+        fprintf(stderr, "Could not open `%s'.\n", filename);
+        return NULL;
+    }
+
+    try
+    {
+        uint8_t version, endian;
+        try
+        {
+            if (NULL != (rp_ptr = record_parser::create(f)))
+            {
+                auto_ptr<record_parser> rp(rp_ptr);
+                uint8_t type = rp->get_type();
+                uint8_t wordsize;
+                uint8_t expected_version = 1;
+
+                if (type != DG_R_HEADER)
+                    throw record_parser_error("Error: did not find header");
+                if (rp->extract_string() != "DATAGRIND1")
+                    throw record_parser_error("Error: did not find signature");
+                version = rp->extract_byte();
+                endian = rp->extract_byte();
+                wordsize = rp->extract_byte();
+                if (version != expected_version)
+                {
+                    fprintf(stderr, "Warning: version mismatch (expected %d, got %u).\n",
+                            expected_version, version);
+                }
+                /* TODO: do something useful with endianness */
+
+                switch (wordsize)
+                {
+                case 4:
+                    accesses = new dg_view<uint32_t>;
+                    break;
+                case 8:
+                    accesses = new dg_view<uint64_t>;
+                    break;
+                default:
+                    {
+                        ostringstream msg;
+                        msg << "Error: unsupported word size (got " << wordsize << ", expected 4 or 8)";
+                        throw record_parser_error(msg.str());
+                    }
+                }
+            }
+            else
+            {
+                throw record_parser_error("Error: empty or unreadable file");
+            }
+        }
+        catch (record_parser_content_error &e)
+        {
+            fprintf(stderr, "%s: %s\n", filename, e.what());
+            rp->discard();
+        }
+
+        accesses->load_internal(version, endian);
+    }
+    catch (record_parser_error &e)
+    {
+        fprintf(stderr, "%s: %s\n", filename, e.what());
+        fclose(f);
+        return NULL;
+    }
+    catch (...)
+    {
+        fclose(f);
+        throw;
+    }
+
+    fclose(f);
+    return accesses.release();
 }
 
 size_t dg_view_remap_address(HWord a)

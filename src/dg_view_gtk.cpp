@@ -200,6 +200,8 @@ public:
 /* Container for the main window and all its state */
 struct viewer
 {
+    dg_view_base *accesses;
+
     GtkWidget *window;             /* GtkWindow */
     viewer_region region;
 
@@ -537,16 +539,9 @@ static void build_stack_trace_view(stack_trace_view *stv)
 
 static void prepare_min_max(viewer *v)
 {
-    const bbrun_list &bbruns = dg_view_bbruns();
-    const page_map &pages = dg_view_page_map();
-
-    double addr_min = pages.begin()->second;
-    double addr_max = (--pages.end())->second + DG_VIEW_PAGE_SIZE;
-    double iseq_min = bbruns.begin()->iseq_start;
-
-    bbrun_list::const_iterator last_bbrun = --bbruns.end();
-    const bbdef &last_bbdef = dg_view_bbrun_get_bbdef(*last_bbrun);
-    double iseq_max = last_bbrun->iseq_start + last_bbdef.accesses.back().iseq + 1;
+    address_type addr_min, addr_max;
+    iseq_type iseq_min, iseq_max;
+    viewer->accesses->get_ranges(addr_min, addr_max, iseq_min, iseq_max);
 
     v->addr_adj = GTK_ADJUSTMENT(gtk_adjustment_new(addr_min, addr_min, addr_max,
                                                     addr_max - addr_min,
@@ -807,49 +802,40 @@ void viewer_region::update()
 
     update_lines();
 
-    const bbrun_list &bbruns = dg_view_bbruns();
     const double addr_min = dims[0].lower();
     const double addr_max = dims[0].upper();
     const double iseq_min = dims[1].lower();
     const double iseq_max = dims[1].upper();
-    for (bbrun_list::const_iterator bbr = bbruns.begin(); bbr != bbruns.end(); ++bbr)
+
+    for (dg_view_base::const_iterator a = owner->accesses->begin(); a != owner->accesses->end(); ++a)
     {
-        for (size_t j = 0; j < bbr->n_addrs; j++)
-            if (bbr->addrs[j])
-            {
-                const bbdef &bbd = dg_view_bbrun_get_bbdef(*bbr);
-                g_assert(j < bbd.accesses.size());
-                const bbdef_access &bbda = bbd.accesses[j];
+        address_type addr = a->get_addr();
+        iseq_type iseq = a->get_iseq();
 
-                size_t addr = dg_view_remap_address(bbr->addrs[j]);
-                size_t iseq = bbr->iseq_start + bbda.iseq;
-                int x1, x2, y1, y2;
-
-                if (range_to_pixels(addr, addr + bbda.size,
-                                    addr_min, addr_max, width,
-                                    x1, x2) &&
-                    range_to_pixels(iseq, iseq + 1,
-                                    iseq_min, iseq_max, height,
-                                    y1, y2))
+        if (range_to_pixels(addr, addr + bbda.size,
+                            addr_min, addr_max, width,
+                            x1, x2) &&
+            range_to_pixels(iseq, iseq + 1,
+                            iseq_min, iseq_max, height,
+                            y1, y2))
+        {
+            for (int y = y1; y < y2; y++)
+                for (int x = x1; x < x2; x++)
                 {
-                    for (int y = y1; y < y2; y++)
-                        for (int x = x1; x < x2; x++)
-                        {
-                            guchar * const p = pixels + y * rowstride + x * n_channels;
-                            switch (bbda.dir)
-                            {
-                            case DG_ACC_READ:
-                                p[1] = 255; /* green */
-                                break;
-                            case DG_ACC_WRITE:
-                                p[0] = 255; /* red */
-                                break;
-                            default:
-                                g_assert_not_reached();
-                            }
-                        }
+                    guchar * const p = pixels + y * rowstride + x * n_channels;
+                    switch (a->get_dir())
+                    {
+                    case DG_ACC_READ:
+                        p[1] = 255; /* green */
+                        break;
+                    case DG_ACC_WRITE:
+                        p[0] = 255; /* red */
+                        break;
+                    default:
+                        g_assert_not_reached();
+                    }
                 }
-            }
+        }
     }
 
     gtk_widget_queue_draw(image);
@@ -940,30 +926,29 @@ void viewer_region::on_release(GtkWidget *widget, GdkEventButton *event)
             double iseq_scale = iseq_size / height;
             double ratio = iseq_scale / addr_scale;
 
-            HWord remapped = (HWord) (0.5 + (event->x + 0.5) * addr_scale + addr_min);
-            HWord addr = dg_view_revmap_addr(remapped);
+            size_t remapped = (size_t) (0.5 + (event->x + 0.5) * addr_scale + addr_min);
+            address_type addr = owner->accesses->revmap_addr(remapped);
             double iseq = (event->y + 0.5) * iseq_scale + iseq_min;
 
-            mem_access access = dg_view_nearest_access(addr, iseq, ratio);
-            if (access.size != 0)
+            dg_view_base::const_iterator access = owner->accesses->nearest_access(addr, iseq, ratio);
+            if (owner->accesses->end())
             {
                 ostringstream addr_str;
-                addr_str << showbase << hex << access.addr;
+                addr_str << showbase << hex << access->get_addr();
                 gtk_entry_set_text(GTK_ENTRY(owner->addr_entry), addr_str.str().c_str());
 
-                mem_block *block = access.block;
-                if (block != NULL)
+                if (access->get_mem_size() != 0)
                 {
                     addr_str.str("");
-                    addr_str << block->addr;
+                    addr_str << access->get_mem_addr();
                     gtk_entry_set_text(GTK_ENTRY(owner->block_addr_entry), addr_str.str().c_str());
 
                     ostringstream size_str;
-                    size_str << block->size;
+                    size_str << access->get_mem_size();
                     gtk_entry_set_text(GTK_ENTRY(owner->block_size_entry), size_str.str().c_str());
 
                     ostringstream offset_str;
-                    offset_str << access.addr - block->addr;
+                    offset_str << access.addr - access->get_mem_addr();
                     gtk_entry_set_text(GTK_ENTRY(owner->block_offset_entry), offset_str.str().c_str());
 
                     stack_trace_view_populate(&owner->block_stack, block->stack);
@@ -977,7 +962,7 @@ void viewer_region::on_release(GtkWidget *widget, GdkEventButton *event)
                     stack_trace_view_populate(&owner->block_stack, vector<HWord>());
                 }
 
-                stack_trace_view_populate(&owner->access_stack, access.stack);
+                stack_trace_view_populate(&owner->access_stack, access->get_mem_stack());
             }
         }
     }
