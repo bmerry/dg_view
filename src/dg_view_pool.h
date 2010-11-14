@@ -33,6 +33,9 @@
  * chunk.
  */
 
+#ifndef DG_VIEW_POOL_H
+#define DG_VIEW_POOL_H
+
 #include <list>
 #include <cstddef>
 
@@ -118,3 +121,5 @@ T *pool_allocator<T>::alloc(size_t n)
     }
     return ans;
 }
+
+#endif /* DG_VIEW_POOL_H */

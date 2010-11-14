@@ -60,13 +60,13 @@ public:
             bfd_close(abfd);
     }
 
-    bool load(const char *filename);
+    bool load(const std::string &filename);
 };
 
 class object_file
 {
 public:
-    HWord text_avma;
+    address_type text_avma;
     object_subfile *subfiles[2];
 
     object_file() : text_avma(0)
@@ -90,18 +90,18 @@ private:
 static map<string, object_file *> object_files;
 
 /* Loads either the main file or the .gnu_debuglink file */
-bool object_subfile::load(const char *filename)
+bool object_subfile::load(const std::string &filename)
 {
     char **matching;
     long symcount = 0, storage;
-    size_t filename_len = strlen(filename);
+    size_t filename_len = filename.size();
 
     delete[] this->filename;
     if (abfd != NULL)
         bfd_close(abfd);
 
     this->filename = new char[filename_len + 1];
-    strcpy(this->filename, filename);
+    strcpy(this->filename, filename.c_str());
     abfd = bfd_openr(this->filename, NULL);
     if (!abfd)
         return false;
@@ -136,7 +136,7 @@ bool object_subfile::load(const char *filename)
 
 } /* namespace */
 
-void dg_view_load_object_file(const char *filename, HWord text_avma)
+void dg_view_load_object_file(const std::string &filename, address_type text_avma)
 {
     auto_ptr<object_subfile> primary(new object_subfile);
     if (!primary->load(filename))
@@ -164,7 +164,7 @@ void dg_view_load_object_file(const char *filename, HWord text_avma)
 
 struct addr2info_info
 {
-    HWord addr;
+    address_type addr;
     object_file *obj;
     object_subfile *sub;
     bool found;
@@ -198,7 +198,7 @@ static void addr2info_section(bfd *abfd, asection *sect, void *arg)
     info->found = true;
 }
 
-void dg_view_addr2info(HWord addr, string &function, string &file, int &line, string &dso)
+void dg_view_addr2info(address_type addr, string &function, string &file, int &line, string &dso)
 {
     function = "";
     file = "";
@@ -270,7 +270,7 @@ string dg_view_abbrev_dso(const string &full)
     return dg_view_abbrev_file(full);
 }
 
-string dg_view_addr2line(HWord addr)
+string dg_view_addr2line(address_type addr)
 {
     string function, file, dso;
     int line;

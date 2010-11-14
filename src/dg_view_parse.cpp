@@ -85,12 +85,16 @@ uint8_t record_parser::extract_byte()
     return v;
 }
 
-HWord record_parser::extract_word()
+template<typename T>
+T record_parser::extract_word()
 {
-    HWord v;
+    T v;
     extract_bytes((uint8_t *) &v, sizeof(v));
     return v;
 }
+
+template uint32_t record_parser::extract_word<uint32_t>();
+template uint64_t record_parser::extract_word<uint64_t>();
 
 void record_parser::extract_bytes(uint8_t *buffer, size_t len)
 {

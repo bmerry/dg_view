@@ -33,144 +33,45 @@
 #include <set>
 #include <map>
 #include "dg_view_pool.h"
-#include "dg_view_rangemap.h"
+#include "dg_view_range.h"
+#include "dg_view_options.h"
+#include "dg_view_base.h"
 
 /* TODO: get from the guest */
 #define DG_VIEW_PAGE_SIZE 4096
 #define DG_VIEW_LINE_SIZE 64
 
-/* Abstract base class, which holds data about an input file. It it subclassed
- * based on the word size of the file.
- */
-class dg_view_base
-{
-private:
-    /* Abstract base class for the data in an iterator. This is separated
-     * out from the iterator class itself so that the iterator class can
-     * be non-virtual.
-     */
-    class iterator_data_base
-    {
-        /* Creates an identical copy in new memory */
-        virtual iterator_data *clone() const = 0;
-
-        /* Moves on to the next access */
-        virtual void increment() = 0;
-
-        virtual ~iterator_data() {}
-
-        virtual address_type get_addr() const = 0;
-        virtual iseq_type get_iseq() const = 0;
-        virtual size_t get_size() const = 0; /* Size of the access */
-        virtual uint8_t get_dir() const = 0; /* One of the DG_ACC_* tokens */
-        virtual std::vector<address_type> get_stack() const = 0;
-
-        /* Information about the memory block accessed */
-        virtual address_type get_mem_addr() const = 0;
-        virtual address_type get_mem_size() const = 0; /* 0 if no information available */
-        virtual std::vector<address_type> get_mem_stack() const = 0;
-        virtual std::string get_mem_label() const = 0;
-    };
-
-public:
-    typedef uint64_t address_type;
-    typedef uint64_t iseq_type;
-
-    /* Iterator over the data accesses. This is a wrapper class that
-     * wraps an instance of a subclass of iterator_data.
-     */
-    class iterator
-    {
-        iterator_data *data; /* Actually a pointer to a subclass */
-
-        iterator() : data(NULL) {}
-        iterator(const iterator &it) : data(NULL)
-        {
-            if (it.data != NULL)
-                data = it.data->clone();
-        }
-
-        ~iterator() { delete data; }
-
-        iterator &operator=(const iterator &it)
-        {
-            delete data;
-            if (it.data != NULL)
-            {
-                data = it.data->clone();
-            }
-            else
-            {
-                data = NULL;
-            }
-            return *this;
-        }
-
-        iterator &operator++()
-        {
-            data->increment();
-            return *this;
-        }
-
-        iterator operator++(int)
-        {
-            iterator old(*this);
-            data->increment();
-            return old;
-        }
-
-        const iterator_data *operator
-
-        bool operator==(const iterator &it) const
-        {
-            if (data == NULL && it.data == NULL)
-            {
-                return true;
-            }
-            else if (data != NULL && it.data != NULL)
-            {
-                return *data == *it.data;
-            }
-            else
-            {
-                return false;
-            }
-        }
-
-        bool operator!=(const iterator &it) const
-        {
-            return !(*this == it);
-        }
-    };
-
-    typedef iterator const_iterator;
-
-protected:
-    friend dg_view_base *dg_view_load(const char *filename);
-
-public:
-    virtual const_iterator begin() const = 0;
-    virtual const_iterator end() const = 0;
-    virtual void get_ranges(address_type &addr_min, address_type &addr_max, iseq_type &iseq_min, iseq_type &iseq_max) const = 0;
-
-    /* ratio is the ratio of address scale to iseq scale: a large value for ratio
-     * increases the importance of the address in the match.
-     *
-     * Returns the best score and best index for the block. If there were no
-     * usable addresses, returns score of HUGE_VAL.
-     */
-    virtual const_iterator nearest_access(double addr, double iseq, double ratio) const = 0;
-};
-
+/* Subclass containing the implementation, templatised by the word size. */
 template<typename WordType>
 class dg_view : public dg_view_base
 {
 private:
-    typedef iterator_data : public iterator_data_base
+    class bbrun;
+    class bbdef;
+    class bbdef_access;
+    class context;
+
+    typedef WordType word_type;
+
+    class iterator_data : public iterator_data_base
     {
-        dg_view<WordType> *owner;
+    public:
+        const dg_view<WordType> *owner;
         std::size_t bbrun_index;
         std::size_t addr_index;
+
+    protected:
+        virtual iterator_data_base *clone() const;
+        virtual void increment();
+
+    private:
+        const bbrun &get_bbrun() const;
+        const context &get_context() const;
+        const bbdef &get_bbdef() const;
+        const bbdef_access &get_bbdef_access() const;
+
+    public:
+        virtual bool operator==(const iterator_data_base &b) const;
 
         virtual address_type get_addr() const;
         virtual iseq_type get_iseq() const;
@@ -183,10 +84,9 @@ private:
         virtual address_type get_mem_size() const;
         virtual std::vector<address_type> get_mem_stack() const;
         virtual std::string get_mem_label() const;
-    };
 
-private:
-    typedef WordType word_type;
+        virtual ~iterator_data() {}
+    };
 
     /* Memory block allocated with malloc or similar function in the guest */
     struct mem_block
@@ -223,12 +123,10 @@ private:
         uint64_t dseq_start;
         uint32_t context_index;
         uint32_t n_addrs;
-        word_type *addrs;             /* Allocated from word_pool; NULL means discarded */
-        mem_block<Word> **blocks;     /* Allocated from mem_block_ptr_pool */
+        word_type *addrs;            /* Allocated from word_pool; NULL means discarded */
+        mem_block **blocks;          /* Allocated from mem_block_ptr_pool */
     };
 
-    typedef std::map<word_type, size_t> forward_page_map;
-    typedef std::map<size_t, word_type> reverse_page_map;
     typedef std::vector<bbrun> bbrun_list;
 
     struct compare_bbrun_iseq
@@ -249,16 +147,24 @@ private:
         }
     };
 
-    /* Set of conditions to match stack traces against based on command-line options */
-    struct condition_set
+    /* Wrapper around an options condition_set with a cache for lookups */
+    class condition_set
     {
-        uint32_t flags;         /* set-specific flags, not generically used */
-        std::set<std::string> user;
-        std::set<std::string> functions;
-        std::set<std::string> files;
-        std::set<std::string> dsos;
-        mutable std::map<word_type, bool> cache; /* cache for condition_set_match */
+    private:
+        mutable std::map<word_type, bool> cache;
+
+    public:
+        const dg_view_options::condition_set &base;
+
+        condition_set(const dg_view_options::condition_set &base) : base(base) {}
+        /* Checks whether a condition specified by a condition_set is met. It
+         * does not consider user events or the flags.
+         */
+        bool match(const std::vector<word_type> &stack) const;
     };
+
+    typedef std::map<address_type, size_t> forward_page_map;
+    typedef std::map<size_t, address_type> reverse_page_map;
 
     const bbdef &bbrun_get_bbdef(const bbrun &bbr) const;
 
@@ -268,14 +174,10 @@ public:
     virtual void get_ranges(address_type &addr_min, address_type &addr_max, iseq_type &iseq_min, iseq_type &iseq_max) const;
     virtual const_iterator nearest_access(double addr, double iseq, double ratio) const;
 
-    void parse_opts(int *argc, char **argv);
-    void usage(const char *prog, int code) const;
-    bool load(const char *filename);
-
-    /* Takes a compressed address and maps it to an original one */
-    word_type revmap_addr(std::size_t addr) const;
-    /* Maps original address to compressed address */
-    std::size_t remap_address(word_type a) const;
+    virtual forward_page_map_iterator page_map_begin() const;
+    virtual forward_page_map_iterator page_map_end() const;
+    virtual address_type revmap_addr(std::size_t addr) const;
+    virtual std::size_t remap_address(address_type a) const;
 
 private:
     pool_allocator<word_type> word_pool;
@@ -305,18 +207,19 @@ private:
 
     mem_block *find_block(word_type addr) const;
 
-    /* Checks whether a condition specified by a condition_set is met. It does not
-     * include user events or the flags.
-     */
-    bool condition_set_match(const condition_set &cs, const std::vector<word_type> &stack) const;
-
     /* Whether a memory access matches the range conditions */
     bool keep_access_block(word_type addr, uint8_t size, mem_block *block) const;
 
     /* Whether a memory access matches the event conditions */
     bool keep_access_event(const std::vector<word_type> &stack) const;
 
+    /* Whether a memory access matches the selection criteria */
     bool keep_access(word_type addr, uint8_t size, const std::vector<word_type> &stack, mem_block *block) const;
+
+    dg_view(FILE *f, const std::string &filename, int version, int endian, const dg_view_options &options);
+    friend dg_view_base *dg_view_load(const std::string &filename, const dg_view_options &options);
 };
+
+dg_view_base *dg_view_load(const std::string &filename, const dg_view_options &options);
 
 #endif /* DG_VIEW_H */

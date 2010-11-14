@@ -30,6 +30,7 @@
 #include <cmath>
 #include <algorithm>
 #include <sstream>
+#include <memory>
 
 #include "dg_view.h"
 #include "dg_view_debuginfo.h"
@@ -541,7 +542,7 @@ static void prepare_min_max(viewer *v)
 {
     address_type addr_min, addr_max;
     iseq_type iseq_min, iseq_max;
-    viewer->accesses->get_ranges(addr_min, addr_max, iseq_min, iseq_max);
+    v->accesses->get_ranges(addr_min, addr_max, iseq_min, iseq_max);
 
     v->addr_adj = GTK_ADJUSTMENT(gtk_adjustment_new(addr_min, addr_min, addr_max,
                                                     addr_max - addr_min,
@@ -741,13 +742,16 @@ void viewer_region::update_lines()
     const double addr_min = dims[0].lower();
     const double addr_max = dims[0].upper();
     const double xrate = dims[0].range() / width;
-    const page_map &pm = dg_view_page_map();
     const uint8_t color_cut[3] = {192, 192, 192}; // light gray
     const uint8_t color_page[3] = {64, 64, 64};   // dark gray
     const uint8_t color_cache[3] = {96, 32, 32};  // reddish
     int x;
-    HWord last = 0;
-    for (page_map::const_iterator i = pm.begin(); i != pm.end(); ++i)
+    address_type last = 0;
+
+    dg_view_base::forward_page_map_iterator i, pm_first, pm_last;
+    pm_first = owner->accesses->page_map_begin();
+    pm_last = owner->accesses->page_map_end();
+    for (i = pm_first; i != pm_last; ++i)
     {
         if (i->first != last + DG_VIEW_PAGE_SIZE)
         {
@@ -809,10 +813,12 @@ void viewer_region::update()
 
     for (dg_view_base::const_iterator a = owner->accesses->begin(); a != owner->accesses->end(); ++a)
     {
-        address_type addr = a->get_addr();
+        address_type orig_addr = a->get_addr();
+        size_t addr = owner->accesses->remap_address(orig_addr);
         iseq_type iseq = a->get_iseq();
+        int x1, y1, x2, y2;
 
-        if (range_to_pixels(addr, addr + bbda.size,
+        if (range_to_pixels(addr, addr + a->get_size(),
                             addr_min, addr_max, width,
                             x1, x2) &&
             range_to_pixels(iseq, iseq + 1,
@@ -874,7 +880,7 @@ static gboolean viewer_region_on_press(GtkWidget *widget, GdkEventButton *event,
     return FALSE;
 }
 
-static void stack_trace_view_populate(stack_trace_view *stv, const vector<HWord> &st)
+static void stack_trace_view_populate(stack_trace_view *stv, const vector<address_type> &st)
 {
     gtk_list_store_clear(stv->store);
     for (size_t i = 0; i < st.size();i++)
@@ -931,7 +937,7 @@ void viewer_region::on_release(GtkWidget *widget, GdkEventButton *event)
             double iseq = (event->y + 0.5) * iseq_scale + iseq_min;
 
             dg_view_base::const_iterator access = owner->accesses->nearest_access(addr, iseq, ratio);
-            if (owner->accesses->end())
+            if (access != owner->accesses->end())
             {
                 ostringstream addr_str;
                 addr_str << showbase << hex << access->get_addr();
@@ -948,10 +954,10 @@ void viewer_region::on_release(GtkWidget *widget, GdkEventButton *event)
                     gtk_entry_set_text(GTK_ENTRY(owner->block_size_entry), size_str.str().c_str());
 
                     ostringstream offset_str;
-                    offset_str << access.addr - access->get_mem_addr();
+                    offset_str << access->get_addr() - access->get_mem_addr();
                     gtk_entry_set_text(GTK_ENTRY(owner->block_offset_entry), offset_str.str().c_str());
 
-                    stack_trace_view_populate(&owner->block_stack, block->stack);
+                    stack_trace_view_populate(&owner->block_stack, access->get_mem_stack());
                 }
                 else
                 {
@@ -959,7 +965,7 @@ void viewer_region::on_release(GtkWidget *widget, GdkEventButton *event)
                     gtk_entry_set_text(GTK_ENTRY(owner->block_addr_entry), "");
                     gtk_entry_set_text(GTK_ENTRY(owner->block_size_entry), "");
                     gtk_entry_set_text(GTK_ENTRY(owner->block_offset_entry), "");
-                    stack_trace_view_populate(&owner->block_stack, vector<HWord>());
+                    stack_trace_view_populate(&owner->block_stack, vector<address_type>());
                 }
 
                 stack_trace_view_populate(&owner->access_stack, access->get_mem_stack());
@@ -1013,17 +1019,23 @@ static void viewer_region_dimension_on_zoom_in(GtkAction *action, gpointer user_
 
 int main(int argc, char **argv)
 {
-    viewer main_viewer;
     gtk_init(&argc, &argv);
+    dg_view_options options;
 
-    dg_view_parse_opts(&argc, argv);
+    options.parse_opts(&argc, argv);
     if (argc != 2)
     {
         dg_view_usage(argv[0], 2);
     }
-    if (!dg_view_load(argv[1]))
-        return 1;
 
+    auto_ptr<dg_view_base> accesses(dg_view_load(argv[1], options));
+    if (accesses.get() == NULL)
+    {
+        return 1;
+    }
+
+    viewer main_viewer;
+    main_viewer.accesses = accesses.get();
     build_main_window(&main_viewer);
     main_viewer.region.update();
     gtk_main();

@@ -50,5 +50,6 @@ env.Program('dg_view', source = [
     'dg_view_core.cpp',
     'dg_view_debuginfo.cpp',
     'dg_view_parse.cpp',
-    'dg_view_gtk.cpp'],
+    'dg_view_gtk.cpp',
+    'dg_view_options.cpp'],
     parse_flags = '!pkg-config --cflags --libs gtk+-2.0 gdk-pixbuf-2.0')

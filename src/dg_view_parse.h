@@ -22,8 +22,8 @@
    The GNU General Public License is contained in the file COPYING.
 */
 
-#ifndef __DG_VIEW_PARSE_H
-#define __DG_VIEW_PARSE_H
+#ifndef DG_VIEW_PARSE_H
+#define DG_VIEW_PARSE_H
 
 #include <stdint.h>
 #include <cstdio>
@@ -31,7 +31,7 @@
 #include <stdexcept>
 #include <string>
 
-#include "dg_view.h"
+#include "dg_view_base.h"
 
 class record_parser_error : public std::runtime_error
 {
@@ -108,7 +108,7 @@ public:
      */
 
     uint8_t extract_byte();
-    HWord extract_word();
+    template<typename T> T extract_word();
     void extract_bytes(uint8_t *buffer, std::size_t len);
     /* Assumes string is in the standard Datagrind encoding */
     std::string extract_string();
@@ -125,4 +125,4 @@ public:
     void discard();
 };
 
-#endif /* __DG_VIEW_PARSE_H */
+#endif /* DG_VIEW_PARSE_H */
