@@ -968,7 +968,7 @@ void viewer_region::on_release(GtkWidget *widget, GdkEventButton *event)
                     stack_trace_view_populate(&owner->block_stack, vector<address_type>());
                 }
 
-                stack_trace_view_populate(&owner->access_stack, access->get_mem_stack());
+                stack_trace_view_populate(&owner->access_stack, access->get_stack());
             }
         }
     }

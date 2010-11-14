@@ -125,13 +125,13 @@ bool object_subfile::load(const std::string &filename)
         }
     }
     if (symcount <= 0)
+    {
+        bfd_close(abfd);
+        abfd = NULL;
         return false;
+    }
 
     return true;
-
-    bfd_close(abfd);
-    abfd = NULL;
-    return false;
 }
 
 } /* namespace */
@@ -150,7 +150,6 @@ void dg_view_load_object_file(const std::string &filename, address_type text_avm
     delete of->subfiles[1];
     of->subfiles[0] = primary.release();
     of->subfiles[1] = NULL;
-    primary.release();
 
     char *gnu_debuglink = bfd_follow_gnu_debuglink(of->subfiles[0]->abfd, "/usr/lib/debug");
     if (gnu_debuglink != NULL)
